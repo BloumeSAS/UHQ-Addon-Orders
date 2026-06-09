@@ -16,9 +16,9 @@ services:
       PANEL_URL:     http://host.docker.internal:8000
       DB_PATH:       /app/data/orders-data.json
       NODE_ENV:      production
-      # Intégration Wallet (obligatoire)
+      # Intégration Wallet — seul WALLET_URL est requis.
+      # PANEL_API_KEY est utilisé pour l'auth inter-addon (partagé avec le Wallet).
       WALLET_URL:    http://host.docker.internal:3001
-      # WALLET_SERVICE_TOKEN: <jwt-admin-du-panel>
       # PANEL_API_KEY: votre-clé-api-panel
     volumes:
       - orders_data:/app/data

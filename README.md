@@ -17,6 +17,8 @@ Orders **ne stocke aucun solde**. Il délègue toute la gestion du solde à l'ad
 
 L'addon Wallet doit donc être **installé, déployé et joignable**. Tant qu'il ne l'est pas, la boutique affiche un avertissement et le paiement est désactivé.
 
+> 🔑 **Aucun token admin requis.** Les deux addons s'authentifient mutuellement via `PANEL_API_KEY` — la même clé déjà utilisée pour le système de backup. Pas de JWT à récupérer, pas d'expiration à gérer.
+
 ---
 
 ## Fonctionnalités
@@ -38,7 +40,7 @@ L'addon Wallet doit donc être **installé, déployé et joignable**. Tant qu'il
 git clone https://github.com/BloumeSAS/UHQ-Addon-Orders
 cd UHQ-Addon-Orders
 npm run install:all
-cp .env.example .env       # puis renseigner WALLET_URL + WALLET_SERVICE_TOKEN
+cp .env.example .env   # renseigner WALLET_URL (et PANEL_API_KEY si protection backup souhaitée)
 npm run build && npm start
 ```
 
@@ -53,23 +55,33 @@ cd web && npm run dev          # Vite   :5175
 
 ---
 
-## Configuration de l'intégration Wallet
+## Intégration Wallet — zero-config
 
 | Variable | Obligatoire | Description |
 |---|---|---|
 | `WALLET_URL` | ✅ | URL de base de l'addon Wallet (ex. `https://wallet.domaine.com` ou `http://wallet:3001` en compose) |
-| `WALLET_SERVICE_TOKEN` | ✅ (paiement) | JWT d'un compte **ADMIN** du panel, utilisé pour débiter/créditer le solde côté serveur |
+| `PANEL_API_KEY` | Recommandé | Clé API du panel — protège aussi le backup. Déjà définie si vous utilisez les deux addons en production. |
 
-Le débit du solde se fait via `POST {WALLET_URL}/api/wallet/add`, réservé aux admins par l'addon Wallet — d'où le token de service. Récupérez un JWT admin depuis le panel (clé `token` du `localStorage` après connexion admin) ; privilégiez un **compte de service** dédié.
+**C'est tout.** Pas de `WALLET_SERVICE_TOKEN`. Les communications inter-addons sont sécurisées via `PANEL_API_KEY`, le même header `X-Panel-Key` que le système de backup. Si `PANEL_API_KEY` n'est pas définie (dev local), les appels sont autorisés sans authentification (comportement identique au backup).
 
-> ℹ️ Un JWT a une date d'expiration. Utilisez un compte de service avec un token à durée de vie longue, ou renouvelez `WALLET_SERVICE_TOKEN` lorsqu'il expire.
+### Comment ça marche
+
+```
+[Orders]  POST /api/wallet/internal/add
+          Header: X-Panel-Key: <PANEL_API_KEY>
+          ──────────────────────────────────►  [Wallet]
+                                               Vérifie X-Panel-Key === PANEL_API_KEY
+                                               Débite / crédite le wallet
+```
+
+Le Wallet expose `/api/wallet/internal/add` **uniquement** pour les appels inter-addons. Cet endpoint n'est pas documenté dans l'API publique du Wallet et n'est pas accessible sans la clé.
 
 ---
 
 ## Docker (Coolify)
 
 1. Nouveau service Docker Compose → coller `docker-compose.coolify.yml`
-2. Variables : `PANEL_URL`, `PANEL_API_KEY`, `WALLET_URL`, `WALLET_SERVICE_TOKEN`, `DOMAIN`
+2. Variables : `PANEL_URL`, `PANEL_API_KEY`, `WALLET_URL`, `DOMAIN`
 3. Volume : `orders_data` → `/app/data`
 4. Connecter dans le panel : `https://orders.domaine.com`
 
@@ -92,17 +104,17 @@ Authentification : `Authorization: Bearer <jwt-panel>` (passé par le panel).
 
 | Méthode | Endpoint | Accès | Description |
 |---|---|---|---|
-| `GET`    | `/api/products`          | user  | Catalogue actif (`?all=true` admin → inclut inactifs) |
-| `POST`   | `/api/products`          | admin | Créer un produit |
-| `PATCH`  | `/api/products/:id`      | admin | Modifier un produit |
-| `DELETE` | `/api/products/:id`      | admin | Supprimer un produit |
-| `GET`    | `/api/orders`            | user  | Mes commandes (`?all=true` admin → toutes) |
-| `POST`   | `/api/orders`            | user  | Passer commande `{ items: [{ product_id, quantity }] }` |
-| `PATCH`  | `/api/orders/:id/status` | admin | `paid` \| `fulfilled` \| `cancelled` (annulation = remboursement) |
-| `GET`    | `/api/balance`           | user  | Solde de l'utilisateur (proxy Wallet) |
-| `GET`    | `/api/wallet-status`     | user  | Wallet joignable / configuré |
-| `GET`    | `/api/backup/export`     | panel | Export (header `X-Panel-Key`) |
-| `POST`   | `/api/backup/import`     | panel | Import (header `X-Panel-Key`) |
+| `GET`    | `/api/products`               | user  | Catalogue actif (`?all=true` admin → inclut inactifs) |
+| `POST`   | `/api/products`               | admin | Créer un produit |
+| `PATCH`  | `/api/products/:id`           | admin | Modifier un produit |
+| `DELETE` | `/api/products/:id`           | admin | Supprimer un produit |
+| `GET`    | `/api/orders`                 | user  | Mes commandes (`?all=true` admin → toutes) |
+| `POST`   | `/api/orders`                 | user  | Passer commande `{ items: [{ product_id, quantity }] }` |
+| `PATCH`  | `/api/orders/:id/status`      | admin | `paid` \| `fulfilled` \| `cancelled` (annulation = remboursement) |
+| `GET`    | `/api/balance`                | user  | Solde de l'utilisateur (proxy Wallet) |
+| `GET`    | `/api/wallet-status`          | user  | Wallet joignable / configuré |
+| `GET`    | `/api/backup/export`          | panel | Export (header `X-Panel-Key`) |
+| `POST`   | `/api/backup/import`          | panel | Import (header `X-Panel-Key`) |
 
 ---
 
@@ -113,9 +125,8 @@ Authentification : `Authorization: Bearer <jwt-panel>` (passé par le panel).
 | `PORT` | `3002` | Port d'écoute |
 | `PANEL_URL` | `http://localhost:8000` | URL du panel |
 | `DB_PATH` | `./orders-data.json` | Fichier de données |
-| `PANEL_API_KEY` | *(vide)* | Clé API pour le backup |
+| `PANEL_API_KEY` | *(vide)* | Clé API du panel (backup + auth inter-addon) |
 | `WALLET_URL` | `http://localhost:3001` | URL de l'addon Wallet |
-| `WALLET_SERVICE_TOKEN` | *(vide)* | JWT admin pour débiter le solde |
 
 ---
 

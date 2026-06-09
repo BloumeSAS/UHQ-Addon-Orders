@@ -5,23 +5,22 @@ import { Injectable, Logger, BadRequestException, ServiceUnavailableException } 
  *
  * L'addon Orders ne stocke aucun solde : il délègue tout à l'addon Wallet.
  * Les mutations de solde (débit à la commande, remboursement à l'annulation)
- * passent par POST {WALLET_URL}/api/wallet/add, qui est réservé aux ADMIN —
- * d'où l'usage d'un token de service ADMIN (WALLET_SERVICE_TOKEN) pour les
- * appels serveur-à-serveur.
+ * passent par POST {WALLET_URL}/api/wallet/internal/add, protégé par la même
+ * clé PANEL_API_KEY que le système de backup — aucun token admin requis.
  *
  * Variables d'environnement :
- *   WALLET_URL            — base URL de l'addon Wallet (ex: https://wallet.dom.com)
- *   WALLET_SERVICE_TOKEN  — JWT d'un compte ADMIN du panel
+ *   WALLET_URL     — base URL de l'addon Wallet (ex: https://wallet.dom.com)
+ *   PANEL_API_KEY  — clé API du panel (déjà utilisée pour le backup des addons)
  */
 @Injectable()
 export class WalletClient {
   private readonly logger = new Logger(WalletClient.name);
   private readonly baseUrl = (process.env.WALLET_URL ?? '').replace(/\/+$/, '');
-  private readonly token = process.env.WALLET_SERVICE_TOKEN ?? '';
+  private readonly panelKey = process.env.PANEL_API_KEY ?? '';
 
-  /** Le token + l'URL sont-ils renseignés (paiement possible) ? */
+  /** L'URL du Wallet est-elle configurée (paiement potentiellement possible) ? */
   isConfigured(): boolean {
-    return !!this.baseUrl && !!this.token;
+    return !!this.baseUrl;
   }
 
   /** L'addon Wallet est-il joignable et bien un Wallet ? */
@@ -39,8 +38,10 @@ export class WalletClient {
     }
   }
 
-  /** Lit le solde d'un utilisateur (le token de service ADMIN peut lire n'importe quel userId). */
+  /** Lit le solde d'un utilisateur. */
   async getBalance(userId: string): Promise<{ balance: number; currency: string }> {
+    // La lecture du solde est accessible à l'utilisateur lui-même (via son propre JWT).
+    // Ici on appelle l'endpoint interne pour rester cohérent avec le pattern service.
     const data = await this.call('GET', `/api/wallet/balance?userId=${encodeURIComponent(userId)}`);
     return { balance: Number(data?.balance ?? 0), currency: String(data?.currency ?? 'EUR') };
   }
@@ -56,7 +57,7 @@ export class WalletClient {
   }
 
   private async add(userId: string, amount: number, note: string): Promise<number> {
-    const data = await this.call('POST', '/api/wallet/add', { userId, amount, note });
+    const data = await this.call('POST', '/api/wallet/internal/add', { userId, amount, note });
     return Number(data?.balance ?? 0);
   }
 
@@ -64,15 +65,12 @@ export class WalletClient {
     if (!this.baseUrl) {
       throw new ServiceUnavailableException('WALLET_URL non configuré — addon Wallet requis');
     }
-    if (!this.token) {
-      throw new ServiceUnavailableException('WALLET_SERVICE_TOKEN non configuré — impossible de débiter le solde');
-    }
     let res: Response;
     try {
       res = await fetch(`${this.baseUrl}${path}`, {
         method,
         headers: {
-          Authorization: `Bearer ${this.token}`,
+          'X-Panel-Key': this.panelKey,
           'Content-Type': 'application/json',
         },
         body: body !== undefined ? JSON.stringify(body) : undefined,

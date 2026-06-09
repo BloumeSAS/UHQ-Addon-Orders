@@ -2,13 +2,15 @@
 # Utiliser ce fichier comme "Docker Compose" dans Coolify.
 #
 # Variables d'environnement à configurer dans Coolify :
-#   PORT                 = 3002
-#   PANEL_URL            = https://votre-panel.domaine.com
-#   PANEL_API_KEY        = (clé API dans Paramètres → Clé API du panel)
-#   WALLET_URL           = https://wallet.domaine.com   (addon Wallet, OBLIGATOIRE)
-#   WALLET_SERVICE_TOKEN = (JWT d'un compte ADMIN du panel)
-#   DOMAIN               = orders.domaine.com
-#   NODE_ENV             = production
+#   PORT          = 3002
+#   PANEL_URL     = https://votre-panel.domaine.com
+#   PANEL_API_KEY = (clé API dans Paramètres → Clé API du panel)
+#   WALLET_URL    = https://wallet.domaine.com   (addon Wallet, OBLIGATOIRE)
+#   DOMAIN        = orders.domaine.com
+#   NODE_ENV      = production
+#
+# Note : plus besoin de WALLET_SERVICE_TOKEN — l'addon Orders utilise
+#        PANEL_API_KEY pour s'authentifier auprès du Wallet.
 #
 # Volume persistant Coolify :
 #   Source : orders_data   |   Destination : /app/data
@@ -27,7 +29,6 @@ services:
       PANEL_URL:            "${PANEL_URL}"
       PANEL_API_KEY:        "${PANEL_API_KEY}"
       WALLET_URL:           "${WALLET_URL}"
-      WALLET_SERVICE_TOKEN: "${WALLET_SERVICE_TOKEN}"
       DB_PATH:              /app/data/orders-data.json
       NODE_ENV:             production
     volumes:
