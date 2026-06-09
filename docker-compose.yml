@@ -1,0 +1,33 @@
+# ─── Développement local ──────────────────────────────────────────────────────
+# Lance l'addon orders précompilé (après npm run build dans api/ et web/)
+# Pour le hot-reload, préférer :
+#   cd api && npm run start:dev  (NestJS :3002)
+#   cd web && npm run dev        (Vite :5175)
+
+services:
+  orders:
+    build: .
+    container_name: uhq-addon-orders
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    environment:
+      PORT:          3002
+      PANEL_URL:     http://host.docker.internal:8000
+      DB_PATH:       /app/data/orders-data.json
+      NODE_ENV:      production
+      # Intégration Wallet (obligatoire)
+      WALLET_URL:    http://host.docker.internal:3001
+      # WALLET_SERVICE_TOKEN: <jwt-admin-du-panel>
+      # PANEL_API_KEY: votre-clé-api-panel
+    volumes:
+      - orders_data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3002/uhq-manifest.json"]
+      interval: 30s
+      timeout:  5s
+      retries:  3
+
+volumes:
+  orders_data:
+    driver: local
