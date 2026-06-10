@@ -1,6 +1,6 @@
 {
   "name": "uhq-addon-orders",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Addon Orders pour UHQ Panel OS — boutique payée avec le solde Wallet (NestJS + React)",
   "private": true,
   "scripts": {
