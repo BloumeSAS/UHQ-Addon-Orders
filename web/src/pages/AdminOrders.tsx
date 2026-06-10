@@ -3,6 +3,18 @@ import { useAddon } from '../context';
 import { useT, fmt, fmtDate } from '../i18n';
 import { createApi } from '../lib/api';
 
+interface DeliveryAccount {
+  threads_limit?: number;
+  traffic_limit_bytes?: number;
+  country_filter?: string;
+  sticky_session_ttl?: number;
+  bandwidth_limit?: number;
+  expires_days?: number;
+  allowed_ips?: string;
+  tags?: string;
+  custom_proxies?: string;
+}
+interface DeliveryConfig { mode: 'none' | 'panel_account'; account?: DeliveryAccount; }
 interface Product {
   id: string;
   name: string;
@@ -11,8 +23,17 @@ interface Product {
   currency: string;
   stock: number | null;
   active: boolean;
+  delivery?: DeliveryConfig;
 }
 interface OrderLine { product_id: string; name: string; unit_price: number; quantity: number; }
+interface DeliveredAccount {
+  product_name: string;
+  username: string;
+  password: string;
+  host: string;
+  port: string;
+  connection: string;
+}
 interface Order {
   id: string;
   user_id: string;
@@ -20,6 +41,7 @@ interface Order {
   total: number;
   currency: string;
   status: 'paid' | 'fulfilled' | 'cancelled';
+  deliveries?: DeliveredAccount[];
   created_at: string;
 }
 
@@ -27,8 +49,26 @@ const STATUS_BADGE: Record<string, string> = {
   paid: 'badge-green', fulfilled: 'badge-amber', cancelled: 'badge-red',
 };
 
-interface ProductForm { name: string; description: string; price: string; stock: string; active: boolean; }
-const EMPTY_FORM: ProductForm = { name: '', description: '', price: '', stock: '', active: true };
+interface ProductForm {
+  name: string; description: string; price: string; stock: string; active: boolean;
+  // Livraison
+  deliveryMode: 'none' | 'panel_account';
+  dThreads: string; dTrafficGb: string; dCountry: string; dTtl: string;
+  dBandwidth: string; dExpiresDays: string; dAllowedIps: string; dTags: string; dCustomProxies: string;
+}
+const EMPTY_FORM: ProductForm = {
+  name: '', description: '', price: '', stock: '', active: true,
+  deliveryMode: 'none',
+  dThreads: '', dTrafficGb: '', dCountry: '', dTtl: '1800',
+  dBandwidth: '', dExpiresDays: '', dAllowedIps: '*', dTags: '', dCustomProxies: '',
+};
+
+/** Parse un champ numérique optionnel (vide → undefined). */
+const numOpt = (s: string): number | undefined => {
+  const v = parseInt(s, 10);
+  return s.trim() === '' || isNaN(v) ? undefined : v;
+};
+const GB = 1024 ** 3;
 
 export default function AdminOrders() {
   const { token, role, lang } = useAddon();
@@ -67,12 +107,23 @@ export default function AdminOrders() {
   const openNew = () => { setEditingId(''); setForm(EMPTY_FORM); setFeedback(null); };
   const openEdit = (p: Product) => {
     setEditingId(p.id);
+    const a = p.delivery?.account ?? {};
     setForm({
       name: p.name,
       description: p.description ?? '',
       price: String(p.price),
       stock: p.stock === null ? '' : String(p.stock),
       active: p.active,
+      deliveryMode: p.delivery?.mode ?? 'none',
+      dThreads: a.threads_limit != null ? String(a.threads_limit) : '',
+      dTrafficGb: a.traffic_limit_bytes ? String(Math.round((a.traffic_limit_bytes / GB) * 100) / 100) : '',
+      dCountry: a.country_filter ?? '',
+      dTtl: a.sticky_session_ttl != null ? String(a.sticky_session_ttl) : '1800',
+      dBandwidth: a.bandwidth_limit != null ? String(a.bandwidth_limit) : '',
+      dExpiresDays: a.expires_days != null ? String(a.expires_days) : '',
+      dAllowedIps: a.allowed_ips ?? '*',
+      dTags: a.tags ?? '',
+      dCustomProxies: a.custom_proxies ?? '',
     });
     setFeedback(null);
   };
@@ -91,6 +142,28 @@ export default function AdminOrders() {
     // en édition on envoie -1 ? non : le backend traite 'absent' = inchangé.
     // Pour repasser en illimité on ne peut pas via PATCH ici → on documente :
     if (form.stock.trim() !== '') body.stock = Math.max(0, parseInt(form.stock, 10) || 0);
+
+    // Config de livraison
+    if (form.deliveryMode === 'panel_account') {
+      body.delivery = {
+        mode: 'panel_account',
+        account: {
+          threads_limit: numOpt(form.dThreads),
+          traffic_limit_bytes: form.dTrafficGb.trim() !== '' && !isNaN(parseFloat(form.dTrafficGb))
+            ? Math.round(parseFloat(form.dTrafficGb) * GB)
+            : undefined,
+          country_filter: form.dCountry.trim() || undefined,
+          sticky_session_ttl: numOpt(form.dTtl),
+          bandwidth_limit: numOpt(form.dBandwidth),
+          expires_days: numOpt(form.dExpiresDays),
+          allowed_ips: form.dAllowedIps.trim() || undefined,
+          tags: form.dTags.trim() || undefined,
+          custom_proxies: form.dCustomProxies.trim() || undefined,
+        },
+      };
+    } else {
+      body.delivery = { mode: 'none' };
+    }
 
     try {
       if (editingId) await api.patch(`products/${editingId}`, body);
@@ -164,6 +237,71 @@ export default function AdminOrders() {
               <input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} />
               <span className="text-sm">{t('active')}</span>
             </label>
+
+            {/* ─── Livraison automatique ─────────────────────────────────── */}
+            <div style={{ borderTop: '1px solid var(--border)', paddingTop: '0.75rem' }}>
+              <label className="label-text">{t('deliveryMode')}</label>
+              <select
+                className="input"
+                value={form.deliveryMode}
+                onChange={(e) => setForm({ ...form, deliveryMode: e.target.value as ProductForm['deliveryMode'] })}
+              >
+                <option value="none">{t('deliveryNone')}</option>
+                <option value="panel_account">{t('deliveryPanelAccount')}</option>
+              </select>
+              <p className="text-sm" style={{ color: 'var(--muted)', marginTop: '0.25rem' }}>
+                {form.deliveryMode === 'panel_account' ? t('deliveryPanelHint') : t('deliveryNoneHint')}
+              </p>
+            </div>
+
+            {form.deliveryMode === 'panel_account' && (
+              <div className="space-y-3" style={{ background: 'var(--bg)', padding: '0.75rem', borderRadius: '8px' }}>
+                <div className="grid-2">
+                  <div>
+                    <label className="label-text">{t('dThreads')}</label>
+                    <input className="input" type="number" min="0" value={form.dThreads} onChange={(e) => setForm({ ...form, dThreads: e.target.value })} placeholder="∞" />
+                  </div>
+                  <div>
+                    <label className="label-text">{t('dTraffic')}</label>
+                    <input className="input" type="number" min="0" step="0.1" value={form.dTrafficGb} onChange={(e) => setForm({ ...form, dTrafficGb: e.target.value })} placeholder="∞" />
+                  </div>
+                </div>
+                <div className="grid-2">
+                  <div>
+                    <label className="label-text">{t('dCountry')}</label>
+                    <input className="input" value={form.dCountry} onChange={(e) => setForm({ ...form, dCountry: e.target.value })} placeholder="FR,DE" />
+                  </div>
+                  <div>
+                    <label className="label-text">{t('dTtl')}</label>
+                    <input className="input" type="number" min="0" value={form.dTtl} onChange={(e) => setForm({ ...form, dTtl: e.target.value })} placeholder="1800" />
+                  </div>
+                </div>
+                <div className="grid-2">
+                  <div>
+                    <label className="label-text">{t('dBandwidth')}</label>
+                    <input className="input" type="number" min="0" value={form.dBandwidth} onChange={(e) => setForm({ ...form, dBandwidth: e.target.value })} placeholder="∞" />
+                  </div>
+                  <div>
+                    <label className="label-text">{t('dExpiresDays')}</label>
+                    <input className="input" type="number" min="0" value={form.dExpiresDays} onChange={(e) => setForm({ ...form, dExpiresDays: e.target.value })} placeholder="∞" />
+                  </div>
+                </div>
+                <div>
+                  <label className="label-text">{t('dAllowedIps')}</label>
+                  <input className="input" value={form.dAllowedIps} onChange={(e) => setForm({ ...form, dAllowedIps: e.target.value })} placeholder="*" />
+                </div>
+                <div>
+                  <label className="label-text">{t('dTags')}</label>
+                  <input className="input" value={form.dTags} onChange={(e) => setForm({ ...form, dTags: e.target.value })} placeholder="residential,fr" />
+                </div>
+                <div>
+                  <label className="label-text">{t('dCustomProxies')}</label>
+                  <textarea className="input" rows={3} value={form.dCustomProxies} onChange={(e) => setForm({ ...form, dCustomProxies: e.target.value })} placeholder="socks5://user:pass@1.2.3.4:1080" />
+                  <p className="text-sm" style={{ color: 'var(--muted)', marginTop: '0.25rem' }}>{t('dCustomProxiesHint')}</p>
+                </div>
+              </div>
+            )}
+
             <div className="form-row">
               <button className="btn btn-primary" onClick={saveProduct} disabled={saving}>{saving ? '…' : t('save')}</button>
               <button className="btn btn-outline" onClick={() => setEditingId(null)}>{t('cancel')}</button>
@@ -186,6 +324,7 @@ export default function AdminOrders() {
                     <th>{t('name')}</th>
                     <th>{t('price')}</th>
                     <th>{t('stock')}</th>
+                    <th>{t('delivery')}</th>
                     <th>{t('status')}</th>
                     <th>{t('actions')}</th>
                   </tr>
@@ -196,6 +335,11 @@ export default function AdminOrders() {
                       <td className="text-bold">{p.name}</td>
                       <td>{fmt(p.price, p.currency, lang)}</td>
                       <td className="mono">{p.stock === null ? '∞' : p.stock}</td>
+                      <td>
+                        {p.delivery?.mode === 'panel_account'
+                          ? <span className="badge badge-green">{p.delivery.account?.custom_proxies ? t('deliveryPrivate') : t('deliveryPool')}</span>
+                          : <span className="text-sm" style={{ color: 'var(--muted)' }}>—</span>}
+                      </td>
                       <td><span className={`badge ${p.active ? 'badge-green' : 'badge-muted'}`}>{p.active ? t('active') : t('inactive')}</span></td>
                       <td>
                         <div className="flex gap-1">

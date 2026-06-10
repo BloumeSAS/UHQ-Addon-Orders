@@ -2,6 +2,26 @@ import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 
+/** Specs du compte proxy créé sur le panel à la livraison (toutes optionnelles). */
+export interface DeliveryAccount {
+  threads_limit?: number;
+  traffic_limit_bytes?: number;
+  country_filter?: string;
+  sticky_session_ttl?: number;
+  bandwidth_limit?: number;
+  expires_days?: number;
+  allowed_ips?: string;
+  tags?: string;
+  /** Liste privée d'upstreams ; vide = pool partagé. */
+  custom_proxies?: string;
+}
+
+/** Config de livraison d'un produit. */
+export interface DeliveryConfig {
+  mode: 'none' | 'panel_account';
+  account?: DeliveryAccount;
+}
+
 export interface ProductRecord {
   id: string;
   name: string;
@@ -11,6 +31,8 @@ export interface ProductRecord {
   /** null = stock illimité */
   stock: number | null;
   active: boolean;
+  /** Livraison automatique (défaut : { mode: 'none' }). */
+  delivery: DeliveryConfig;
   created_at: string;
   updated_at: string;
 }
@@ -20,6 +42,20 @@ export interface OrderItem {
   name: string;
   unit_price: number;
   quantity: number;
+}
+
+/** Compte proxy livré à l'acheteur après paiement. */
+export interface DeliveredAccount {
+  product_id: string;
+  product_name: string;
+  username: string;
+  password: string;
+  host: string;
+  port: string;
+  /** Ligne prête à l'emploi : host:port:username:password */
+  connection: string;
+  /** id du UserProxy créé côté panel (pour traçabilité). */
+  panel_user_id?: string;
 }
 
 export type OrderStatus = 'paid' | 'fulfilled' | 'cancelled';
@@ -32,6 +68,8 @@ export interface OrderRecord {
   currency: string;
   status: OrderStatus;
   note: string | null;
+  /** Comptes proxy livrés (vide si aucun produit livrable). */
+  deliveries: DeliveredAccount[];
   created_at: string;
   updated_at: string;
 }

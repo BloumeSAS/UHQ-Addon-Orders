@@ -13,12 +13,21 @@ interface Product {
   active: boolean;
 }
 interface OrderLine { product_id: string; name: string; unit_price: number; quantity: number; }
+interface DeliveredAccount {
+  product_name: string;
+  username: string;
+  password: string;
+  host: string;
+  port: string;
+  connection: string;
+}
 interface Order {
   id: string;
   items: OrderLine[];
   total: number;
   currency: string;
   status: 'paid' | 'fulfilled' | 'cancelled';
+  deliveries?: DeliveredAccount[];
   created_at: string;
 }
 interface Balance { balance: number; currency: string; available: boolean; }
@@ -40,6 +49,14 @@ export default function Store() {
   const [error, setError]       = useState('');
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
   const [placing, setPlacing]   = useState(false);
+  const [copied, setCopied]     = useState<string>('');
+
+  const copy = (text: string, key: string) => {
+    navigator.clipboard?.writeText(text).then(() => {
+      setCopied(key);
+      setTimeout(() => setCopied(''), 1500);
+    });
+  };
 
   const load = () => {
     Promise.all([
@@ -196,14 +213,42 @@ export default function Store() {
                 </tr>
               </thead>
               <tbody>
-                {orders.map((o) => (
-                  <tr key={o.id}>
-                    <td className="mono">{fmtDate(o.created_at, lang)}</td>
-                    <td className="text-sm">{o.items.map((l) => `${l.quantity}× ${l.name}`).join(', ')}</td>
-                    <td className="text-bold">{fmt(o.total, o.currency, lang)}</td>
-                    <td><span className={`badge ${STATUS_BADGE[o.status]}`}>{t(o.status)}</span></td>
-                  </tr>
-                ))}
+                {orders.map((o) => {
+                  const deliveries = o.deliveries ?? [];
+                  const showCreds = deliveries.length > 0 && o.status !== 'cancelled';
+                  return (
+                    <>
+                      <tr key={o.id}>
+                        <td className="mono">{fmtDate(o.created_at, lang)}</td>
+                        <td className="text-sm">{o.items.map((l) => `${l.quantity}× ${l.name}`).join(', ')}</td>
+                        <td className="text-bold">{fmt(o.total, o.currency, lang)}</td>
+                        <td><span className={`badge ${STATUS_BADGE[o.status]}`}>{t(o.status)}</span></td>
+                      </tr>
+                      {showCreds && (
+                        <tr key={`${o.id}-creds`}>
+                          <td colSpan={4} style={{ background: 'var(--bg2)' }}>
+                            <div className="text-sm text-bold mb-2">🔑 {t('deliveredProxies')}</div>
+                            <div className="space-y-2">
+                              {deliveries.map((d, i) => (
+                                <div key={i} className="flex items-center gap-2 flex-wrap">
+                                  <code className="mono" style={{ background: 'var(--bg)', padding: '2px 8px', borderRadius: 6, fontSize: '0.85em' }}>
+                                    {d.connection}
+                                  </code>
+                                  <button
+                                    className="btn btn-sm btn-outline"
+                                    onClick={() => copy(d.connection, `${o.id}-${i}`)}
+                                  >
+                                    {copied === `${o.id}-${i}` ? `✓ ${t('copied')}` : t('copy')}
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </>
+                  );
+                })}
               </tbody>
             </table>
           </div>
