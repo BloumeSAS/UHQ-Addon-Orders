@@ -1,6 +1,6 @@
 {
   "name": "Orders",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Boutique interne : l'admin gère un catalogue de produits, les utilisateurs passent commande et paient avec leur solde Wallet. Nécessite l'addon Wallet.",
   "icon": "ShoppingCart",
   "author": {
