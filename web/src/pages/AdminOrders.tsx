@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { toast } from 'sonner';
 import { useAddon } from '../context';
 import { useT, fmt, fmtDate } from '../i18n';
 import { createApi } from '../lib/api';
@@ -79,7 +80,6 @@ export default function AdminOrders() {
   const [orders, setOrders]     = useState<Order[]>([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState('');
-  const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
   const [walletWarn, setWalletWarn] = useState(false);
 
   // Formulaire produit (création / édition)
@@ -104,7 +104,7 @@ export default function AdminOrders() {
     load();
   }, [token, role]);
 
-  const openNew = () => { setEditingId(''); setForm(EMPTY_FORM); setFeedback(null); };
+  const openNew = () => { setEditingId(''); setForm(EMPTY_FORM); };
   const openEdit = (p: Product) => {
     setEditingId(p.id);
     const a = p.delivery?.account ?? {};
@@ -125,13 +125,12 @@ export default function AdminOrders() {
       dTags: a.tags ?? '',
       dCustomProxies: a.custom_proxies ?? '',
     });
-    setFeedback(null);
   };
 
   const saveProduct = async () => {
     const price = parseFloat(form.price);
     if (!form.name.trim() || isNaN(price) || price < 0) return;
-    setSaving(true); setFeedback(null);
+    setSaving(true);
     const body: Record<string, unknown> = {
       name: form.name.trim(),
       description: form.description.trim() || undefined,
@@ -171,7 +170,7 @@ export default function AdminOrders() {
       setEditingId(null);
       load();
     } catch (e: any) {
-      setFeedback({ type: 'err', msg: e.message });
+      toast.error(e.message);
     } finally {
       setSaving(false);
     }
@@ -180,16 +179,16 @@ export default function AdminOrders() {
   const deleteProduct = async (p: Product) => {
     if (!window.confirm(t('confirmDelete'))) return;
     try { await api.del(`products/${p.id}`); load(); }
-    catch (e: any) { setFeedback({ type: 'err', msg: e.message }); }
+    catch (e: any) { toast.error(e.message); }
   };
 
   const setStatus = async (o: Order, status: 'fulfilled' | 'cancelled') => {
     try {
       await api.patch(`orders/${o.id}/status`, { status });
-      setFeedback({ type: 'ok', msg: t(status) });
+      toast.success(t(status));
       load();
     } catch (e: any) {
-      setFeedback({ type: 'err', msg: e.message });
+      toast.error(e.message);
     }
   };
 
@@ -206,9 +205,6 @@ export default function AdminOrders() {
       </div>
 
       {walletWarn && <div className="alert alert-warn">{t('walletNotConfigured')}</div>}
-      {feedback && (
-        <div className={`alert alert-${feedback.type === 'ok' ? 'success' : 'error'}`}>{feedback.msg}</div>
-      )}
 
       {/* Formulaire produit */}
       {editingId !== null && (

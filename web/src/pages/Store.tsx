@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { toast } from 'sonner';
 import { useAddon } from '../context';
 import { useT, fmt, fmtDate } from '../i18n';
 import { createApi } from '../lib/api';
@@ -47,7 +48,6 @@ export default function Store() {
   const [cart, setCart]         = useState<Record<string, number>>({});
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState('');
-  const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
   const [placing, setPlacing]   = useState(false);
   const [copied, setCopied]     = useState<string>('');
 
@@ -94,14 +94,14 @@ export default function Store() {
   const checkout = async () => {
     const items = Object.entries(cart).map(([product_id, quantity]) => ({ product_id, quantity }));
     if (!items.length) return;
-    setPlacing(true); setFeedback(null);
+    setPlacing(true);
     try {
       await api.post('orders', { items });
-      setFeedback({ type: 'ok', msg: t('orderPlaced') });
+      toast.success(t('orderPlaced'));
       setCart({});
       load();
     } catch (e: any) {
-      setFeedback({ type: 'err', msg: e.message });
+      toast.error(e.message);
     } finally {
       setPlacing(false);
     }
@@ -127,12 +127,6 @@ export default function Store() {
 
       {walletDown && (
         <div className="alert alert-warn mb-4">{t('walletRequired')}</div>
-      )}
-
-      {feedback && (
-        <div className={`alert alert-${feedback.type === 'ok' ? 'success' : 'error'} mb-4`}>
-          {feedback.msg}
-        </div>
       )}
 
       {/* Catalogue */}
