@@ -29,7 +29,8 @@
       "label": "addon.orders.nav",
       "icon": "ShoppingCart",
       "showInNavbar": false,
-      "adminOnly": false
+      "adminOnly": false,
+      "primary": true
     },
     {
       "path": "/admin",
