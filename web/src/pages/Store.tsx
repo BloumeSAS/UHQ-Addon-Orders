@@ -198,9 +198,9 @@ export default function Store() {
                   <button className="btn btn-outline btn-block" disabled>{t('outOfStock')}</button>
                 ) : qty > 0 ? (
                   <div className="form-row" style={{ justifyContent: 'center' }}>
-                    <button className="btn btn-sm btn-outline" onClick={() => setQty(p, qty - 1)}>−</button>
-                    <span className="text-bold" style={{ minWidth: 28, textAlign: 'center' }}>{qty}</span>
-                    <button className="btn btn-sm btn-outline" onClick={() => setQty(p, qty + 1)}>+</button>
+                    <button className="btn btn-sm btn-outline" onClick={() => setQty(p, qty - 1)} aria-label={`${t('decrease')} ${p.name}`}>−</button>
+                    <span className="text-bold" style={{ minWidth: 28, textAlign: 'center' }} aria-live="polite">{qty}</span>
+                    <button className="btn btn-sm btn-outline" onClick={() => setQty(p, qty + 1)} aria-label={`${t('increase')} ${p.name}`}>+</button>
                   </div>
                 ) : (
                   <button
@@ -315,8 +315,9 @@ export default function Store() {
                                   <button
                                     className="btn btn-sm btn-outline"
                                     onClick={() => copy(d.connection, `${o.id}-${i}`)}
+                                    aria-label={`${t('copy')}: ${d.connection}`}
                                   >
-                                    {copied === `${o.id}-${i}` ? `✓ ${t('copied')}` : t('copy')}
+                                    <span aria-live="polite">{copied === `${o.id}-${i}` ? `✓ ${t('copied')}` : t('copy')}</span>
                                   </button>
                                 </div>
                               ))}

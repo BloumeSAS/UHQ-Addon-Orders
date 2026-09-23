@@ -473,17 +473,17 @@ function PaymentSettingsCard({ token }: { token: string }) {
             </label>
             <div className="space-y-2">
               <div>
-                <label className="label-text">{t('stripePublishableKey')}</label>
-                <input className="input" value={settings.stripePublishableKey} onChange={(e) => set('stripePublishableKey', e.target.value)} placeholder="pk_live_…" />
+                <label className="label-text" htmlFor="stripe-pk">{t('stripePublishableKey')}</label>
+                <input id="stripe-pk" className="input" value={settings.stripePublishableKey} onChange={(e) => set('stripePublishableKey', e.target.value)} placeholder="pk_live_…" />
               </div>
               <div>
-                <label className="label-text">{t('stripeSecretKey')}</label>
-                <input className="input" type="password" value={settings.stripeSecretKey} onChange={(e) => set('stripeSecretKey', e.target.value)} placeholder="sk_live_…" autoComplete="off" />
+                <label className="label-text" htmlFor="stripe-sk">{t('stripeSecretKey')}</label>
+                <input id="stripe-sk" className="input" type="password" value={settings.stripeSecretKey} onChange={(e) => set('stripeSecretKey', e.target.value)} placeholder="sk_live_…" autoComplete="off" />
               </div>
               <div>
-                <label className="label-text">{t('stripeWebhookSecret')}</label>
-                <input className="input" type="password" value={settings.stripeWebhookSecret} onChange={(e) => set('stripeWebhookSecret', e.target.value)} placeholder="whsec_…" autoComplete="off" />
-                <p className="text-xs text-muted mt-1">{t('stripeWebhookHint')}</p>
+                <label className="label-text" htmlFor="stripe-whsec">{t('stripeWebhookSecret')}</label>
+                <input id="stripe-whsec" className="input" type="password" value={settings.stripeWebhookSecret} onChange={(e) => set('stripeWebhookSecret', e.target.value)} placeholder="whsec_…" autoComplete="off" aria-describedby="stripe-whsec-hint" />
+                <p id="stripe-whsec-hint" className="text-xs text-muted mt-1">{t('stripeWebhookHint')}</p>
               </div>
             </div>
           </div>
@@ -496,13 +496,13 @@ function PaymentSettingsCard({ token }: { token: string }) {
             </label>
             <div className="space-y-2">
               <div>
-                <label className="label-text">{t('nowpaymentsApiKey')}</label>
-                <input className="input" type="password" value={settings.nowpaymentsApiKey} onChange={(e) => set('nowpaymentsApiKey', e.target.value)} autoComplete="off" />
+                <label className="label-text" htmlFor="now-key">{t('nowpaymentsApiKey')}</label>
+                <input id="now-key" className="input" type="password" value={settings.nowpaymentsApiKey} onChange={(e) => set('nowpaymentsApiKey', e.target.value)} autoComplete="off" />
               </div>
               <div>
-                <label className="label-text">{t('nowpaymentsIpnSecret')}</label>
-                <input className="input" type="password" value={settings.nowpaymentsIpnSecret} onChange={(e) => set('nowpaymentsIpnSecret', e.target.value)} autoComplete="off" />
-                <p className="text-xs text-muted mt-1">{t('nowpaymentsIpnHint')}</p>
+                <label className="label-text" htmlFor="now-ipn">{t('nowpaymentsIpnSecret')}</label>
+                <input id="now-ipn" className="input" type="password" value={settings.nowpaymentsIpnSecret} onChange={(e) => set('nowpaymentsIpnSecret', e.target.value)} autoComplete="off" aria-describedby="now-ipn-hint" />
+                <p id="now-ipn-hint" className="text-xs text-muted mt-1">{t('nowpaymentsIpnHint')}</p>
               </div>
             </div>
           </div>
