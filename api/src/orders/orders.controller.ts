@@ -124,6 +124,17 @@ export class OrdersController {
     return this.payments.updateSettings(dto);
   }
 
+  /**
+   * GET /api/payments/settings/reveal?key=... — valeur en clair d'un secret.
+   * N'est appelée que par le panel (server-to-server, port interne non exposé
+   * publiquement), après confirmation du mot de passe admin côté panel.
+   */
+  @Get('payments/settings/reveal')
+  revealPaymentSecret(@Req() req: Request, @Query('key') key: string) {
+    requireAdmin(req);
+    return { value: this.payments.revealSecret(key) };
+  }
+
   // ─── Webhooks (publics — appelés par Stripe / NOWPayments, pas par le panel) ─
 
   /**

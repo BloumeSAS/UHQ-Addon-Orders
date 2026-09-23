@@ -47,6 +47,22 @@ export class PaymentsService {
     };
   }
 
+  /**
+   * Valeur en clair d'un secret — jamais exposée via getSettingsMasked().
+   * Appelée uniquement par le panel, lui-même après confirmation du mot de
+   * passe de l'admin (cf. AddonsController.revealPaymentSecret côté panel).
+   */
+  revealSecret(key: string): string {
+    const secretKeys: (keyof PaymentSettings)[] = [
+      'stripeSecretKey', 'stripeWebhookSecret', 'nowpaymentsApiKey', 'nowpaymentsIpnSecret',
+    ];
+    if (!secretKeys.includes(key as keyof PaymentSettings)) {
+      throw new BadRequestException('Clé inconnue');
+    }
+    const s = this.store.paymentSettings as any;
+    return s[key] ?? '';
+  }
+
   updateSettings(patch: Partial<PaymentSettings>): PaymentSettings {
     const current = this.store.paymentSettings;
     const next: PaymentSettings = { ...current };

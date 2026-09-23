@@ -207,7 +207,7 @@ export default function AdminOrders() {
 
       {walletWarn && <div className="alert alert-warn">{t('walletNotConfigured')}</div>}
 
-      <PaymentSettingsCard token={token} />
+      <p className="text-sm text-muted">{t('paymentSettingsMovedHint')}</p>
 
       {/* Formulaire produit */}
       {editingId !== null && (
@@ -404,150 +404,8 @@ export default function AdminOrders() {
   );
 }
 
-// ─── Réglages passerelles de paiement (Stripe / NOWPayments) ────────────────
-
-interface PaymentSettings {
-  stripeEnabled: boolean;
-  stripeSecretKey: string;
-  stripePublishableKey: string;
-  stripeWebhookSecret: string;
-  nowpaymentsEnabled: boolean;
-  nowpaymentsApiKey: string;
-  nowpaymentsIpnSecret: string;
-}
-
-const EMPTY_PAYMENT_SETTINGS: PaymentSettings = {
-  stripeEnabled: false, stripeSecretKey: '', stripePublishableKey: '', stripeWebhookSecret: '',
-  nowpaymentsEnabled: false, nowpaymentsApiKey: '', nowpaymentsIpnSecret: '',
-};
-
-function PaymentSettingsCard({ token }: { token: string }) {
-  const t = useT();
-  const api = useMemo(() => createApi(token), [token]);
-  const [open, setOpen] = useState(false);
-  const [settings, setSettings] = useState<PaymentSettings>(EMPTY_PAYMENT_SETTINGS);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    api.get<PaymentSettings>('payments/settings').then(setSettings).catch((e) => toast.error(e.message));
-  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const set = (k: keyof PaymentSettings, v: string | boolean) => setSettings((s) => ({ ...s, [k]: v }));
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      const updated = await api.post<PaymentSettings>('payments/settings', settings);
-      setSettings(updated);
-      toast.success(t('save'));
-    } catch (e: any) {
-      toast.error(e.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="card">
-      <button
-        type="button"
-        className="flex items-center justify-between w-full"
-        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-      >
-        <span className="text-bold">{t('paymentSettings')}</span>
-        <span aria-hidden="true">{open ? '▲' : '▼'}</span>
-      </button>
-
-      {open && (
-        <div className="space-y-4 mt-3">
-          <p className="text-sm text-muted">{t('paymentSettingsHint')}</p>
-
-          {/* Stripe */}
-          <div className="card card-sm" style={{ background: 'var(--bg2)' }}>
-            <label className="flex items-center gap-2 mb-2" style={{ cursor: 'pointer' }}>
-              <input type="checkbox" checked={settings.stripeEnabled} onChange={(e) => set('stripeEnabled', e.target.checked)} />
-              <span className="text-bold">{t('payWithCard')} (Stripe)</span>
-            </label>
-            <div className="space-y-2">
-              <div>
-                <label className="label-text" htmlFor="stripe-pk">{t('stripePublishableKey')}</label>
-                <input id="stripe-pk" className="input" value={settings.stripePublishableKey} onChange={(e) => set('stripePublishableKey', e.target.value)} placeholder="pk_live_…" />
-              </div>
-              <div>
-                <label className="label-text" htmlFor="stripe-sk">{t('stripeSecretKey')}</label>
-                <input id="stripe-sk" className="input" type="password" value={settings.stripeSecretKey} onChange={(e) => set('stripeSecretKey', e.target.value)} placeholder="sk_live_…" autoComplete="off" />
-              </div>
-              <div>
-                <label className="label-text" htmlFor="stripe-whsec">{t('stripeWebhookSecret')}</label>
-                <input id="stripe-whsec" className="input" type="password" value={settings.stripeWebhookSecret} onChange={(e) => set('stripeWebhookSecret', e.target.value)} placeholder="whsec_…" autoComplete="off" aria-describedby="stripe-whsec-hint" />
-                <WebhookUrlHint id="stripe-whsec-hint" label={t('stripeWebhookHintLabel')} path="payments/stripe/webhook" />
-              </div>
-            </div>
-          </div>
-
-          {/* NOWPayments */}
-          <div className="card card-sm" style={{ background: 'var(--bg2)' }}>
-            <label className="flex items-center gap-2 mb-2" style={{ cursor: 'pointer' }}>
-              <input type="checkbox" checked={settings.nowpaymentsEnabled} onChange={(e) => set('nowpaymentsEnabled', e.target.checked)} />
-              <span className="text-bold">{t('payWithCrypto')} (NOWPayments)</span>
-            </label>
-            <div className="space-y-2">
-              <div>
-                <label className="label-text" htmlFor="now-key">{t('nowpaymentsApiKey')}</label>
-                <input id="now-key" className="input" type="password" value={settings.nowpaymentsApiKey} onChange={(e) => set('nowpaymentsApiKey', e.target.value)} autoComplete="off" />
-              </div>
-              <div>
-                <label className="label-text" htmlFor="now-ipn">{t('nowpaymentsIpnSecret')}</label>
-                <input id="now-ipn" className="input" type="password" value={settings.nowpaymentsIpnSecret} onChange={(e) => set('nowpaymentsIpnSecret', e.target.value)} autoComplete="off" aria-describedby="now-ipn-hint" />
-                <WebhookUrlHint id="now-ipn-hint" label={t('nowpaymentsIpnHintLabel')} path="payments/nowpayments/webhook" />
-              </div>
-            </div>
-          </div>
-
-          <button className="btn btn-primary" onClick={save} disabled={saving}>
-            {saving ? '…' : t('save')}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * Affiche l'URL réelle et cliquable-à-copier du webhook — calculée depuis
- * `window.location` (fonctionne aussi bien embarqué, où `import.meta.env.BASE_URL`
- * vaut `/addon-proxy/orders/`, qu'en déploiement externe où elle vaut `/`) plutôt
- * qu'un texte générique du type "<domaine de cet addon>/…", que l'admin devait
- * reconstituer lui-même.
- */
-function WebhookUrlHint({ id, label, path }: { id: string; label: string; path: string }) {
-  const t = useT();
-  const [copied, setCopied] = useState(false);
-  const url = `${window.location.origin}${import.meta.env.BASE_URL}${path}`.replace(/([^:])\/\/+/g, '$1/');
-
-  const copyUrl = () => {
-    navigator.clipboard?.writeText(url).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  };
-
-  return (
-    <p id={id} className="text-xs text-muted mt-1">
-      {label}{' '}
-      <code className="mono" style={{ background: 'var(--bg)', padding: '1px 6px', borderRadius: 4 }}>{url}</code>{' '}
-      <button
-        type="button"
-        className="btn btn-sm btn-outline"
-        style={{ padding: '1px 6px', fontSize: '0.7rem' }}
-        onClick={copyUrl}
-        aria-label={`${t('copy')}: ${url}`}
-      >
-        <span aria-live="polite">{copied ? `✓ ${t('copied')}` : t('copy')}</span>
-      </button>
-    </p>
-  );
-}
+// Les réglages de passerelles de paiement (Stripe / NOWPayments) vivent
+// désormais dans le panel (Paramètres → Extensions → Boutique), pas ici —
+// voir web/src/pages/admin/Settings.tsx côté UHQ-Panel-OS. L'API
+// GET/POST /api/payments/settings de cet addon reste la source de vérité ;
+// le panel l'appelle via /addon-proxy/orders/api/payments/settings.
