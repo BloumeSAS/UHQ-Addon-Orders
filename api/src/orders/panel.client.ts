@@ -25,6 +25,12 @@ export interface CreateSubUserSpec {
   allowed_ips?: string;
   tags?: string;
   custom_proxies?: string;
+  pool?: string;
+}
+
+export interface PoolInfo {
+  name: string;
+  antiVpnEnabled: boolean;
 }
 
 export interface CreatedSubUser {
@@ -54,6 +60,12 @@ export class PanelClient {
     const port = String(data?.data?.port ?? '').trim();
     this.endpointCache = { host, port };
     return this.endpointCache;
+  }
+
+  /** Liste les catégories (ProxyPool) déclarées sur le panel — pour peupler un sélecteur. */
+  async listPools(): Promise<PoolInfo[]> {
+    const data = await this.call('GET', '/api/v1/common/pools');
+    return Array.isArray(data?.data) ? data.data : [];
   }
 
   /** Bloque (révoque) un compte proxy sur le panel — best-effort. */

@@ -38,8 +38,20 @@ export class OrdersService {
         allowed_ips: a.allowed_ips?.trim() || undefined,
         tags: a.tags?.trim() || undefined,
         custom_proxies: a.custom_proxies?.trim() || undefined,
+        pool: a.pool?.trim() || undefined,
       },
     };
+  }
+
+  /** Catégories (ProxyPool) déclarées sur le panel — pour le sélecteur de livraison. */
+  async listPools() {
+    if (!this.panel.isConfigured()) return [];
+    try {
+      return await this.panel.listPools();
+    } catch (err: any) {
+      this.logger.warn(`Impossible de lister les pools panel : ${err?.message}`);
+      return [];
+    }
   }
 
   // ─── Products ──────────────────────────────────────────────────────────────
@@ -318,6 +330,7 @@ export class OrdersService {
           allowed_ips: acc.allowed_ips ?? '*',
           tags: acc.tags,
           custom_proxies: acc.custom_proxies,
+          pool: acc.pool,
         };
         const created = await this.panel.createSubUser(spec);
         const host = endpoint.host;

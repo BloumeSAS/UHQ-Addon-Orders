@@ -14,6 +14,8 @@ export interface DeliveryAccount {
   tags?: string;
   /** Liste privée d'upstreams ; vide = pool partagé. */
   custom_proxies?: string;
+  /** Nom de la catégorie (ProxyPool) à utiliser ; vide = pool global. Ignoré si custom_proxies renseigné. */
+  pool?: string;
 }
 
 /** Config de livraison d'un produit. */

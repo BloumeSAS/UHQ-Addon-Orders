@@ -32,6 +32,13 @@ export class OrdersController {
     return this.orders.getUserBalance(sub);
   }
 
+  /** GET /api/pools — catégories (ProxyPool) déclarées sur le panel (ADMIN). */
+  @Get('pools')
+  async listPools(@Req() req: Request) {
+    requireAdmin(req);
+    return { pools: await this.orders.listPools() };
+  }
+
   // ─── Products ──────────────────────────────────────────────────────────────
 
   /** GET /api/products — catalogue (actifs ; admin : ?all=true inclut inactifs) */

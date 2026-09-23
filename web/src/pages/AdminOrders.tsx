@@ -14,7 +14,9 @@ interface DeliveryAccount {
   allowed_ips?: string;
   tags?: string;
   custom_proxies?: string;
+  pool?: string;
 }
+interface PoolInfo { name: string; antiVpnEnabled: boolean; }
 interface DeliveryConfig { mode: 'none' | 'panel_account'; account?: DeliveryAccount; }
 interface Product {
   id: string;
@@ -57,12 +59,13 @@ interface ProductForm {
   deliveryMode: 'none' | 'panel_account';
   dThreads: string; dTrafficGb: string; dCountry: string; dTtl: string;
   dBandwidth: string; dExpiresDays: string; dAllowedIps: string; dTags: string; dCustomProxies: string;
+  dPool: string;
 }
 const EMPTY_FORM: ProductForm = {
   name: '', description: '', price: '', stock: '', active: true,
   deliveryMode: 'none',
   dThreads: '', dTrafficGb: '', dCountry: '', dTtl: '1800',
-  dBandwidth: '', dExpiresDays: '', dAllowedIps: '*', dTags: '', dCustomProxies: '',
+  dBandwidth: '', dExpiresDays: '', dAllowedIps: '*', dTags: '', dCustomProxies: '', dPool: '',
 };
 
 /** Parse un champ numérique optionnel (vide → undefined). */
@@ -79,6 +82,7 @@ export default function AdminOrders() {
 
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders]     = useState<Order[]>([]);
+  const [pools, setPools]       = useState<PoolInfo[]>([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState('');
   const [walletWarn, setWalletWarn] = useState(false);
@@ -95,10 +99,18 @@ export default function AdminOrders() {
       api.get<{ available: boolean; configured: boolean }>('wallet-status')
         .then((s) => setWalletWarn(!s.available || !s.configured))
         .catch(() => setWalletWarn(true)),
+      api.get<{ pools: PoolInfo[] }>('pools').then((d) => setPools(d.pools)).catch(() => setPools([])),
     ])
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   };
+
+  useEffect(() => {
+    if (editingId === null) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setEditingId(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [editingId]);
 
   useEffect(() => {
     if (!token || role !== 'ADMIN') { setLoading(false); return; }
@@ -125,6 +137,7 @@ export default function AdminOrders() {
       dAllowedIps: a.allowed_ips ?? '*',
       dTags: a.tags ?? '',
       dCustomProxies: a.custom_proxies ?? '',
+      dPool: a.pool ?? '',
     });
   };
 
@@ -159,6 +172,7 @@ export default function AdminOrders() {
           allowed_ips: form.dAllowedIps.trim() || undefined,
           tags: form.dTags.trim() || undefined,
           custom_proxies: form.dCustomProxies.trim() || undefined,
+          pool: form.dPool.trim() || undefined,
         },
       };
     } else {
@@ -209,10 +223,14 @@ export default function AdminOrders() {
 
       <p className="text-sm text-muted">{t('paymentSettingsMovedHint')}</p>
 
-      {/* Formulaire produit */}
+      {/* Formulaire produit (modal) */}
       {editingId !== null && (
-        <div className="card" style={{ background: 'var(--bg2)' }}>
-          <div className="text-bold mb-3">{editingId ? t('editProduct') : t('addProduct')}</div>
+        <div className="modal-overlay" onClick={() => setEditingId(null)}>
+          <div className="modal-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="product-modal-title">
+          <div className="modal-header">
+            <span id="product-modal-title" className="text-bold">{editingId ? t('editProduct') : t('addProduct')}</span>
+            <button type="button" className="modal-close" onClick={() => setEditingId(null)} aria-label={t('cancel')}>✕</button>
+          </div>
           <div className="space-y-3">
             <div>
               <label className="label-text">{t('name')}</label>
@@ -265,6 +283,24 @@ export default function AdminOrders() {
                     <input className="input" type="number" min="0" step="0.1" value={form.dTrafficGb} onChange={(e) => setForm({ ...form, dTrafficGb: e.target.value })} placeholder="∞" />
                   </div>
                 </div>
+                <div>
+                  <label className="label-text" htmlFor="d-pool">{t('dCategory')}</label>
+                  <select
+                    id="d-pool"
+                    className="input"
+                    value={form.dPool}
+                    onChange={(e) => setForm({ ...form, dPool: e.target.value })}
+                    disabled={!!form.dCustomProxies.trim()}
+                  >
+                    <option value="">{t('dCategoryShared')}</option>
+                    {pools.map((p) => (
+                      <option key={p.name} value={p.name}>{p.name}{p.antiVpnEnabled ? ` (${t('dCategoryAntiVpn')})` : ''}</option>
+                    ))}
+                  </select>
+                  <p className="text-sm" style={{ color: 'var(--muted)', marginTop: '0.25rem' }}>
+                    {form.dCustomProxies.trim() ? t('dCategoryOverriddenHint') : t('dCategoryHint')}
+                  </p>
+                </div>
                 <div className="grid-2">
                   <div>
                     <label className="label-text">{t('dCountry')}</label>
@@ -305,6 +341,7 @@ export default function AdminOrders() {
               <button className="btn btn-primary" onClick={saveProduct} disabled={saving}>{saving ? '…' : t('save')}</button>
               <button className="btn btn-outline" onClick={() => setEditingId(null)}>{t('cancel')}</button>
             </div>
+          </div>
           </div>
         </div>
       )}
