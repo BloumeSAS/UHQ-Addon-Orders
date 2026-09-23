@@ -159,7 +159,17 @@ export class PaymentsService {
     const parsed = JSON.parse(rawBody.toString('utf8'));
     const sorted = Object.keys(parsed).sort().reduce((acc: any, k) => { acc[k] = parsed[k]; return acc; }, {});
     const expected = crypto.createHmac('sha512', secret).update(JSON.stringify(sorted)).digest('hex');
-    if (expected !== signature) {
+    // timingSafeEqual plutôt que !== : une comparaison de chaîne standard
+    // sort tôt au premier octet différent, un attaquant peut mesurer ce
+    // délai pour deviner la signature attendue octet par octet.
+    const expectedBuf = Buffer.from(expected, 'hex');
+    let signatureBuf: Buffer;
+    try {
+      signatureBuf = Buffer.from(signature, 'hex');
+    } catch {
+      throw new BadRequestException('Signature invalide');
+    }
+    if (expectedBuf.length !== signatureBuf.length || !crypto.timingSafeEqual(expectedBuf, signatureBuf)) {
       this.logger.warn('Signature IPN NOWPayments invalide');
       throw new BadRequestException('Signature invalide');
     }
