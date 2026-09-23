@@ -483,7 +483,7 @@ function PaymentSettingsCard({ token }: { token: string }) {
               <div>
                 <label className="label-text" htmlFor="stripe-whsec">{t('stripeWebhookSecret')}</label>
                 <input id="stripe-whsec" className="input" type="password" value={settings.stripeWebhookSecret} onChange={(e) => set('stripeWebhookSecret', e.target.value)} placeholder="whsec_…" autoComplete="off" aria-describedby="stripe-whsec-hint" />
-                <p id="stripe-whsec-hint" className="text-xs text-muted mt-1">{t('stripeWebhookHint')}</p>
+                <WebhookUrlHint id="stripe-whsec-hint" label={t('stripeWebhookHintLabel')} path="payments/stripe/webhook" />
               </div>
             </div>
           </div>
@@ -502,7 +502,7 @@ function PaymentSettingsCard({ token }: { token: string }) {
               <div>
                 <label className="label-text" htmlFor="now-ipn">{t('nowpaymentsIpnSecret')}</label>
                 <input id="now-ipn" className="input" type="password" value={settings.nowpaymentsIpnSecret} onChange={(e) => set('nowpaymentsIpnSecret', e.target.value)} autoComplete="off" aria-describedby="now-ipn-hint" />
-                <p id="now-ipn-hint" className="text-xs text-muted mt-1">{t('nowpaymentsIpnHint')}</p>
+                <WebhookUrlHint id="now-ipn-hint" label={t('nowpaymentsIpnHintLabel')} path="payments/nowpayments/webhook" />
               </div>
             </div>
           </div>
@@ -513,5 +513,41 @@ function PaymentSettingsCard({ token }: { token: string }) {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Affiche l'URL réelle et cliquable-à-copier du webhook — calculée depuis
+ * `window.location` (fonctionne aussi bien embarqué, où `import.meta.env.BASE_URL`
+ * vaut `/addon-proxy/orders/`, qu'en déploiement externe où elle vaut `/`) plutôt
+ * qu'un texte générique du type "<domaine de cet addon>/…", que l'admin devait
+ * reconstituer lui-même.
+ */
+function WebhookUrlHint({ id, label, path }: { id: string; label: string; path: string }) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  const url = `${window.location.origin}${import.meta.env.BASE_URL}${path}`.replace(/([^:])\/\/+/g, '$1/');
+
+  const copyUrl = () => {
+    navigator.clipboard?.writeText(url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  return (
+    <p id={id} className="text-xs text-muted mt-1">
+      {label}{' '}
+      <code className="mono" style={{ background: 'var(--bg)', padding: '1px 6px', borderRadius: 4 }}>{url}</code>{' '}
+      <button
+        type="button"
+        className="btn btn-sm btn-outline"
+        style={{ padding: '1px 6px', fontSize: '0.7rem' }}
+        onClick={copyUrl}
+        aria-label={`${t('copy')}: ${url}`}
+      >
+        <span aria-live="polite">{copied ? `✓ ${t('copied')}` : t('copy')}</span>
+      </button>
+    </p>
   );
 }
