@@ -58,7 +58,13 @@ export interface DeliveredAccount {
   panel_user_id?: string;
 }
 
-export type OrderStatus = 'paid' | 'fulfilled' | 'cancelled';
+/**
+ * 'pending' : commande créée pour un paiement externe (Stripe/NOWPayments)
+ * en attente de confirmation webhook — pas encore débitée, pas livrée.
+ * N'existe jamais pour un paiement Wallet (débit synchrone à la commande).
+ */
+export type OrderStatus = 'pending' | 'paid' | 'fulfilled' | 'cancelled';
+export type PaymentMethod = 'wallet' | 'stripe' | 'nowpayments';
 
 export interface OrderRecord {
   id: string;
@@ -68,15 +74,45 @@ export interface OrderRecord {
   currency: string;
   status: OrderStatus;
   note: string | null;
+  payment_method: PaymentMethod;
+  /** Session Stripe / id de paiement NOWPayments — pour réconcilier le webhook. */
+  payment_ref?: string;
   /** Comptes proxy livrés (vide si aucun produit livrable). */
   deliveries: DeliveredAccount[];
   created_at: string;
   updated_at: string;
 }
 
+/**
+ * Clés API des passerelles de paiement externes — mêmes conventions que les
+ * secrets du panel (SettingsService) : jamais renvoyées en clair côté API
+ * (masquées ••••), une valeur vide/masquée en écriture n'écrase jamais un
+ * secret déjà enregistré.
+ */
+export interface PaymentSettings {
+  stripeEnabled: boolean;
+  stripeSecretKey: string;
+  stripePublishableKey: string;
+  stripeWebhookSecret: string;
+  nowpaymentsEnabled: boolean;
+  nowpaymentsApiKey: string;
+  nowpaymentsIpnSecret: string;
+}
+
+export const EMPTY_PAYMENT_SETTINGS: PaymentSettings = {
+  stripeEnabled: false,
+  stripeSecretKey: '',
+  stripePublishableKey: '',
+  stripeWebhookSecret: '',
+  nowpaymentsEnabled: false,
+  nowpaymentsApiKey: '',
+  nowpaymentsIpnSecret: '',
+};
+
 interface StoreData {
   products: Record<string, ProductRecord>;
   orders: OrderRecord[];
+  paymentSettings: PaymentSettings;
 }
 
 /**
@@ -87,7 +123,7 @@ interface StoreData {
 export class StoreService implements OnModuleInit {
   private readonly logger = new Logger(StoreService.name);
   private readonly dbPath: string;
-  private data: StoreData = { products: {}, orders: [] };
+  private data: StoreData = { products: {}, orders: [], paymentSettings: { ...EMPTY_PAYMENT_SETTINGS } };
 
   constructor() {
     // Racine de l'addon = deux niveaux au-dessus de api/
@@ -100,7 +136,11 @@ export class StoreService implements OnModuleInit {
     try {
       if (fs.existsSync(this.dbPath)) {
         const parsed = JSON.parse(fs.readFileSync(this.dbPath, 'utf8'));
-        this.data = { products: parsed.products ?? {}, orders: parsed.orders ?? [] };
+        this.data = {
+          products: parsed.products ?? {},
+          orders: parsed.orders ?? [],
+          paymentSettings: { ...EMPTY_PAYMENT_SETTINGS, ...(parsed.paymentSettings ?? {}) },
+        };
         this.logger.log(`Données chargées depuis ${this.dbPath}`);
       } else {
         this.persist();
@@ -119,6 +159,10 @@ export class StoreService implements OnModuleInit {
 
   get orders(): OrderRecord[] {
     return this.data.orders;
+  }
+
+  get paymentSettings(): PaymentSettings {
+    return this.data.paymentSettings;
   }
 
   // ─── Mutations ────────────────────────────────────────────────────────────────
@@ -148,10 +192,20 @@ export class StoreService implements OnModuleInit {
     this.persist();
   }
 
+  setPaymentSettings(settings: PaymentSettings): void {
+    this.data.paymentSettings = settings;
+    this.persist();
+  }
+
   /** Restaure toutes les données depuis un backup. */
-  restoreData(snapshot: { products: Record<string, ProductRecord>; orders: OrderRecord[] }): void {
+  restoreData(snapshot: {
+    products: Record<string, ProductRecord>;
+    orders: OrderRecord[];
+    paymentSettings?: PaymentSettings;
+  }): void {
     this.data.products = snapshot.products;
     this.data.orders = snapshot.orders;
+    if (snapshot.paymentSettings) this.data.paymentSettings = { ...EMPTY_PAYMENT_SETTINGS, ...snapshot.paymentSettings };
     this.persist();
   }
 

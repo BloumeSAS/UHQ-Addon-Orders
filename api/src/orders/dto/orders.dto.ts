@@ -106,9 +106,28 @@ export class PlaceOrderDto {
   @ValidateNested({ each: true })
   @Type(() => OrderItemDto)
   items!: OrderItemDto[];
+
+  /** Défaut 'wallet' (comportement historique — débit synchrone du solde). */
+  @IsOptional()
+  @IsIn(['wallet', 'stripe', 'nowpayments'])
+  paymentMethod?: 'wallet' | 'stripe' | 'nowpayments';
+
+  /** Requis pour stripe/nowpayments — URL de retour après paiement. */
+  @IsOptional() @IsString() @MaxLength(2000) successUrl?: string;
+  @IsOptional() @IsString() @MaxLength(2000) cancelUrl?: string;
 }
 
 export class OrderStatusDto {
-  @IsIn(['paid', 'fulfilled', 'cancelled'])
-  status!: 'paid' | 'fulfilled' | 'cancelled';
+  @IsIn(['pending', 'paid', 'fulfilled', 'cancelled'])
+  status!: 'pending' | 'paid' | 'fulfilled' | 'cancelled';
+}
+
+export class UpdatePaymentSettingsDto {
+  @IsOptional() @IsBoolean() stripeEnabled?: boolean;
+  @IsOptional() @IsString() @MaxLength(500) stripeSecretKey?: string;
+  @IsOptional() @IsString() @MaxLength(500) stripePublishableKey?: string;
+  @IsOptional() @IsString() @MaxLength(500) stripeWebhookSecret?: string;
+  @IsOptional() @IsBoolean() nowpaymentsEnabled?: boolean;
+  @IsOptional() @IsString() @MaxLength(500) nowpaymentsApiKey?: string;
+  @IsOptional() @IsString() @MaxLength(500) nowpaymentsIpnSecret?: string;
 }

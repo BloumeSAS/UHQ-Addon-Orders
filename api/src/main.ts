@@ -1,6 +1,8 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { json, raw } from 'express';
 import { AppModule } from './app.module';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -16,10 +18,19 @@ if (fs.existsSync(envPath)) {
 }
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     cors: { origin: '*', credentials: false },
     logger: ['error', 'warn', 'log'],
+    bodyParser: false,
   });
+
+  // Corps BRUT (pas de parsing JSON) sur les deux webhooks de paiement —
+  // Stripe/NOWPayments vérifient une signature calculée sur les octets
+  // exacts du corps reçu, un JSON reparsé/réencodé la casserait. Montées
+  // AVANT le parseur JSON global ci-dessous (ordre des `app.use()`).
+  app.use('/api/payments/stripe/webhook', raw({ type: 'application/json' }));
+  app.use('/api/payments/nowpayments/webhook', raw({ type: 'application/json' }));
+  app.use(json({ limit: '2mb' }));
 
   app.useGlobalPipes(
     new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }),

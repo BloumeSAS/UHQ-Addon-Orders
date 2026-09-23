@@ -1,16 +1,20 @@
 import {
-  Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, HttpCode,
+  Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, Headers, HttpCode,
 } from '@nestjs/common';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import { OrdersService } from './orders.service';
+import { PaymentsService } from './payments/payments.service';
 import { authenticate, requireAdmin } from './auth';
 import {
-  CreateProductDto, UpdateProductDto, PlaceOrderDto, OrderStatusDto,
+  CreateProductDto, UpdateProductDto, PlaceOrderDto, OrderStatusDto, UpdatePaymentSettingsDto,
 } from './dto/orders.dto';
 
 @Controller('api')
 export class OrdersController {
-  constructor(private readonly orders: OrdersService) {}
+  constructor(
+    private readonly orders: OrdersService,
+    private readonly payments: PaymentsService,
+  ) {}
 
   // ─── Wallet status ───────────────────────────────────────────────────────────
 
@@ -71,13 +75,21 @@ export class OrdersController {
     return { orders: seeAll ? this.orders.allOrders() : this.orders.userOrders(payload.sub) };
   }
 
-  /** POST /api/orders — passer commande, payée avec le solde Wallet */
+  /**
+   * POST /api/orders — passer commande.
+   * paymentMethod: 'wallet' (défaut) débite immédiatement et livre ; 'stripe'
+   * / 'nowpayments' créent une commande 'pending' et renvoient `checkoutUrl`
+   * vers laquelle le front doit rediriger l'acheteur (paiement confirmé plus
+   * tard par webhook — voir /api/payments/*).
+   */
   @Post('orders')
   @HttpCode(200)
   async placeOrder(@Req() req: Request, @Body() dto: PlaceOrderDto) {
     const { sub } = authenticate(req);
-    const order = await this.orders.placeOrder(sub, dto.items);
-    return { success: true, order };
+    const { order, checkoutUrl } = await this.orders.checkout(
+      sub, dto.items, dto.paymentMethod ?? 'wallet', dto.successUrl, dto.cancelUrl,
+    );
+    return { success: true, order, checkoutUrl };
   }
 
   /** PATCH /api/orders/:id/status — changer le statut (ADMIN) ; annulation = remboursement */
@@ -86,5 +98,84 @@ export class OrdersController {
     requireAdmin(req);
     const order = await this.orders.updateStatus(id, dto.status);
     return { success: true, order };
+  }
+
+  // ─── Paiement : méthodes disponibles + réglages (ADMIN) ─────────────────────
+
+  /** GET /api/payments/methods — quelles passerelles sont actives (jamais de secret exposé). */
+  @Get('payments/methods')
+  async paymentMethods(@Req() req: Request) {
+    authenticate(req);
+    return this.payments.availableMethods();
+  }
+
+  /** GET /api/payments/settings — réglages passerelles (secrets masqués, ADMIN). */
+  @Get('payments/settings')
+  getPaymentSettings(@Req() req: Request) {
+    requireAdmin(req);
+    return this.payments.getSettingsMasked();
+  }
+
+  /** PUT /api/payments/settings — met à jour les réglages (ADMIN). */
+  @Post('payments/settings')
+  @HttpCode(200)
+  updatePaymentSettings(@Req() req: Request, @Body() dto: UpdatePaymentSettingsDto) {
+    requireAdmin(req);
+    return this.payments.updateSettings(dto);
+  }
+
+  // ─── Webhooks (publics — appelés par Stripe / NOWPayments, pas par le panel) ─
+
+  /**
+   * POST /api/payments/stripe/webhook — corps BRUT (Buffer), voir main.ts :
+   * `express.raw()` est monté sur cette route précise AVANT le body-parser
+   * JSON global, requis par `stripe.webhooks.constructEvent`.
+   */
+  @Post('payments/stripe/webhook')
+  @HttpCode(200)
+  async stripeWebhook(@Req() req: Request, @Res() res: Response, @Headers('stripe-signature') sig?: string) {
+    try {
+      const event = this.payments.verifyStripeWebhook(req.body as Buffer, sig);
+      if (event.type === 'checkout.session.completed') {
+        const session = event.data.object as any;
+        const orderId = session.metadata?.order_id;
+        if (orderId) await this.orders.confirmExternalPayment(orderId);
+      } else if (event.type === 'checkout.session.expired') {
+        const session = event.data.object as any;
+        const orderId = session.metadata?.order_id;
+        if (orderId) await this.orders.failExternalPayment(orderId);
+      }
+      res.json({ received: true });
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message ?? 'Webhook invalide' });
+    }
+  }
+
+  /**
+   * POST /api/payments/nowpayments/webhook (IPN) — corps BRUT requis pour la
+   * vérification HMAC (voir main.ts, même raison que Stripe ci-dessus).
+   */
+  @Post('payments/nowpayments/webhook')
+  @HttpCode(200)
+  async nowpaymentsWebhook(@Req() req: Request, @Res() res: Response, @Headers('x-nowpayments-sig') sig?: string) {
+    try {
+      const payload = this.payments.verifyNowPaymentsIpn(req.body as Buffer, sig);
+      // NOWPayments réémet ici l'`order_id` qu'on lui a fourni à la création
+      // de l'invoice (= notre propre OrderRecord.id) — PAS leur propre id de
+      // paiement (celui-là est stocké en `payment_ref` côté nous, pour
+      // référence uniquement, pas pour ce lookup).
+      const order = this.orders.findById(String(payload.order_id ?? ''));
+      if (order) {
+        const status = String(payload.payment_status ?? '').toLowerCase();
+        if (['finished', 'confirmed'].includes(status)) {
+          await this.orders.confirmExternalPayment(order.id);
+        } else if (['failed', 'expired', 'refunded'].includes(status)) {
+          await this.orders.failExternalPayment(order.id);
+        }
+      }
+      res.json({ received: true });
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message ?? 'IPN invalide' });
+    }
   }
 }

@@ -41,13 +41,14 @@ interface Order {
   items: OrderLine[];
   total: number;
   currency: string;
-  status: 'paid' | 'fulfilled' | 'cancelled';
+  status: 'pending' | 'paid' | 'fulfilled' | 'cancelled';
+  payment_method?: 'wallet' | 'stripe' | 'nowpayments';
   deliveries?: DeliveredAccount[];
   created_at: string;
 }
 
 const STATUS_BADGE: Record<string, string> = {
-  paid: 'badge-green', fulfilled: 'badge-amber', cancelled: 'badge-red',
+  pending: 'badge-muted', paid: 'badge-green', fulfilled: 'badge-amber', cancelled: 'badge-red',
 };
 
 interface ProductForm {
@@ -205,6 +206,8 @@ export default function AdminOrders() {
       </div>
 
       {walletWarn && <div className="alert alert-warn">{t('walletNotConfigured')}</div>}
+
+      <PaymentSettingsCard token={token} />
 
       {/* Formulaire produit */}
       {editingId !== null && (
@@ -397,6 +400,118 @@ export default function AdminOrders() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Réglages passerelles de paiement (Stripe / NOWPayments) ────────────────
+
+interface PaymentSettings {
+  stripeEnabled: boolean;
+  stripeSecretKey: string;
+  stripePublishableKey: string;
+  stripeWebhookSecret: string;
+  nowpaymentsEnabled: boolean;
+  nowpaymentsApiKey: string;
+  nowpaymentsIpnSecret: string;
+}
+
+const EMPTY_PAYMENT_SETTINGS: PaymentSettings = {
+  stripeEnabled: false, stripeSecretKey: '', stripePublishableKey: '', stripeWebhookSecret: '',
+  nowpaymentsEnabled: false, nowpaymentsApiKey: '', nowpaymentsIpnSecret: '',
+};
+
+function PaymentSettingsCard({ token }: { token: string }) {
+  const t = useT();
+  const api = useMemo(() => createApi(token), [token]);
+  const [open, setOpen] = useState(false);
+  const [settings, setSettings] = useState<PaymentSettings>(EMPTY_PAYMENT_SETTINGS);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    api.get<PaymentSettings>('payments/settings').then(setSettings).catch((e) => toast.error(e.message));
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const set = (k: keyof PaymentSettings, v: string | boolean) => setSettings((s) => ({ ...s, [k]: v }));
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const updated = await api.post<PaymentSettings>('payments/settings', settings);
+      setSettings(updated);
+      toast.success(t('save'));
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <button
+        type="button"
+        className="flex items-center justify-between w-full"
+        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <span className="text-bold">{t('paymentSettings')}</span>
+        <span aria-hidden="true">{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <div className="space-y-4 mt-3">
+          <p className="text-sm text-muted">{t('paymentSettingsHint')}</p>
+
+          {/* Stripe */}
+          <div className="card card-sm" style={{ background: 'var(--bg2)' }}>
+            <label className="flex items-center gap-2 mb-2" style={{ cursor: 'pointer' }}>
+              <input type="checkbox" checked={settings.stripeEnabled} onChange={(e) => set('stripeEnabled', e.target.checked)} />
+              <span className="text-bold">{t('payWithCard')} (Stripe)</span>
+            </label>
+            <div className="space-y-2">
+              <div>
+                <label className="label-text">{t('stripePublishableKey')}</label>
+                <input className="input" value={settings.stripePublishableKey} onChange={(e) => set('stripePublishableKey', e.target.value)} placeholder="pk_live_…" />
+              </div>
+              <div>
+                <label className="label-text">{t('stripeSecretKey')}</label>
+                <input className="input" type="password" value={settings.stripeSecretKey} onChange={(e) => set('stripeSecretKey', e.target.value)} placeholder="sk_live_…" autoComplete="off" />
+              </div>
+              <div>
+                <label className="label-text">{t('stripeWebhookSecret')}</label>
+                <input className="input" type="password" value={settings.stripeWebhookSecret} onChange={(e) => set('stripeWebhookSecret', e.target.value)} placeholder="whsec_…" autoComplete="off" />
+                <p className="text-xs text-muted mt-1">{t('stripeWebhookHint')}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* NOWPayments */}
+          <div className="card card-sm" style={{ background: 'var(--bg2)' }}>
+            <label className="flex items-center gap-2 mb-2" style={{ cursor: 'pointer' }}>
+              <input type="checkbox" checked={settings.nowpaymentsEnabled} onChange={(e) => set('nowpaymentsEnabled', e.target.checked)} />
+              <span className="text-bold">{t('payWithCrypto')} (NOWPayments)</span>
+            </label>
+            <div className="space-y-2">
+              <div>
+                <label className="label-text">{t('nowpaymentsApiKey')}</label>
+                <input className="input" type="password" value={settings.nowpaymentsApiKey} onChange={(e) => set('nowpaymentsApiKey', e.target.value)} autoComplete="off" />
+              </div>
+              <div>
+                <label className="label-text">{t('nowpaymentsIpnSecret')}</label>
+                <input className="input" type="password" value={settings.nowpaymentsIpnSecret} onChange={(e) => set('nowpaymentsIpnSecret', e.target.value)} autoComplete="off" />
+                <p className="text-xs text-muted mt-1">{t('nowpaymentsIpnHint')}</p>
+              </div>
+            </div>
+          </div>
+
+          <button className="btn btn-primary" onClick={save} disabled={saving}>
+            {saving ? '…' : t('save')}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

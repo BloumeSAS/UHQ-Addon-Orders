@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useAddon } from '../context';
 import { useT, fmt, fmtDate } from '../i18n';
@@ -27,29 +28,51 @@ interface Order {
   items: OrderLine[];
   total: number;
   currency: string;
-  status: 'paid' | 'fulfilled' | 'cancelled';
+  status: 'pending' | 'paid' | 'fulfilled' | 'cancelled';
   deliveries?: DeliveredAccount[];
   created_at: string;
 }
 interface Balance { balance: number; currency: string; available: boolean; }
+interface PaymentMethods {
+  wallet: boolean;
+  stripe: { enabled: boolean; publishableKey: string };
+  nowpayments: { enabled: boolean };
+}
 
 const STATUS_BADGE: Record<string, string> = {
-  paid: 'badge-green', fulfilled: 'badge-amber', cancelled: 'badge-red',
+  pending: 'badge-muted', paid: 'badge-green', fulfilled: 'badge-amber', cancelled: 'badge-red',
 };
 
 export default function Store() {
   const { token, lang } = useAddon();
   const t = useT();
   const api = useMemo(() => createApi(token), [token]);
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders]     = useState<Order[]>([]);
   const [balance, setBalance]   = useState<Balance | null>(null);
+  const [methods, setMethods]   = useState<PaymentMethods | null>(null);
+  const [payWith, setPayWith]   = useState<'wallet' | 'stripe' | 'nowpayments'>('wallet');
   const [cart, setCart]         = useState<Record<string, number>>({});
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState('');
   const [placing, setPlacing]   = useState(false);
   const [copied, setCopied]     = useState<string>('');
+
+  // Retour d'un paiement externe (Stripe/NOWPayments) — la passerelle
+  // redirige le navigateur (hors iframe, cf. checkout()) vers CETTE page
+  // avec ?payment=success|cancelled. Le paiement lui-même est confirmé par
+  // webhook côté serveur, indépendamment de ce retour — ce dernier ne sert
+  // qu'à informer l'acheteur et rafraîchir sa liste de commandes.
+  useEffect(() => {
+    const payment = searchParams.get('payment');
+    if (!payment) return;
+    if (payment === 'success') toast.success(t('paymentReceived'));
+    else if (payment === 'cancelled') toast.info(t('paymentCancelled'));
+    searchParams.delete('payment');
+    setSearchParams(searchParams, { replace: true });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const copy = (text: string, key: string) => {
     navigator.clipboard?.writeText(text).then(() => {
@@ -63,6 +86,7 @@ export default function Store() {
       api.get<{ products: Product[] }>('products').then((d) => setProducts(d.products)),
       api.get<{ orders: Order[] }>('orders').then((d) => setOrders(d.orders)),
       api.get<Balance>('balance').then(setBalance).catch(() => setBalance(null)),
+      api.get<PaymentMethods>('payments/methods').then(setMethods).catch(() => setMethods(null)),
     ])
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -96,10 +120,30 @@ export default function Store() {
     if (!items.length) return;
     setPlacing(true);
     try {
-      await api.post('orders', { items });
-      toast.success(t('orderPlaced'));
-      setCart({});
-      load();
+      if (payWith === 'wallet') {
+        await api.post('orders', { items, paymentMethod: 'wallet' });
+        toast.success(t('orderPlaced'));
+        setCart({});
+        load();
+        return;
+      }
+
+      // Paiement externe : la passerelle (Stripe/NOWPayments) refuse d'être
+      // affichée dans une iframe (sécurité anti-clickjacking de leur côté) —
+      // on redirige donc le NAVIGATEUR ENTIER (window.top, pas cette
+      // iframe) vers sa page de paiement hébergée. successUrl/cancelUrl
+      // pointent vers CETTE page (toujours lisible, même origine que
+      // l'addon lui-même, contrairement à window.top en déploiement
+      // externe) — la passerelle y renvoie l'acheteur après paiement.
+      const returnBase = window.location.href.split('?')[0];
+      const { checkoutUrl } = await api.post<{ success: boolean; order: Order; checkoutUrl?: string }>('orders', {
+        items,
+        paymentMethod: payWith,
+        successUrl: `${returnBase}?payment=success`,
+        cancelUrl: `${returnBase}?payment=cancelled`,
+      });
+      if (!checkoutUrl) throw new Error(t('paymentUrlMissing'));
+      (window.top ?? window).location.href = checkoutUrl;
     } catch (e: any) {
       toast.error(e.message);
     } finally {
@@ -180,10 +224,50 @@ export default function Store() {
             <span className="text-bold">{t('cart')} ({cartCount})</span>
             <span className="product-price">{fmt(cartTotal, currency, lang)}</span>
           </div>
+
+          {/* Méthode de paiement — solde Wallet toujours proposé (si dispo),
+              carte/crypto seulement si l'admin les a activées côté addon. */}
+          {(methods?.stripe.enabled || methods?.nowpayments.enabled) && (
+            <div className="form-row mb-2" role="radiogroup" aria-label={t('payWith')}>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={payWith === 'wallet'}
+                className={`btn btn-sm ${payWith === 'wallet' ? 'btn-primary' : 'btn-outline'}`}
+                onClick={() => setPayWith('wallet')}
+                disabled={!!walletDown}
+              >
+                {t('payWithWallet')}
+              </button>
+              {methods?.stripe.enabled && (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={payWith === 'stripe'}
+                  className={`btn btn-sm ${payWith === 'stripe' ? 'btn-primary' : 'btn-outline'}`}
+                  onClick={() => setPayWith('stripe')}
+                >
+                  {t('payWithCard')}
+                </button>
+              )}
+              {methods?.nowpayments.enabled && (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={payWith === 'nowpayments'}
+                  className={`btn btn-sm ${payWith === 'nowpayments' ? 'btn-primary' : 'btn-outline'}`}
+                  onClick={() => setPayWith('nowpayments')}
+                >
+                  {t('payWithCrypto')}
+                </button>
+              )}
+            </div>
+          )}
+
           <button
             className="btn btn-primary btn-block"
             onClick={checkout}
-            disabled={placing || !!walletDown}
+            disabled={placing || (payWith === 'wallet' && !!walletDown)}
           >
             {placing ? '…' : `${t('orderNow')} — ${fmt(cartTotal, currency, lang)}`}
           </button>
