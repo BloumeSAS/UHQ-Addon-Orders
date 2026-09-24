@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import { useAddon } from '../context';
 import { useT, fmt, fmtDate } from '../i18n';
 import { createApi } from '../lib/api';
+import { useConfirm } from '../useConfirm';
 
 interface DeliveryAccount {
   threads_limit?: number;
@@ -79,6 +80,7 @@ export default function AdminOrders() {
   const { token, role, lang } = useAddon();
   const t = useT();
   const api = useMemo(() => createApi(token), [token]);
+  const [confirmDialog, confirmModal] = useConfirm();
 
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders]     = useState<Order[]>([]);
@@ -192,7 +194,8 @@ export default function AdminOrders() {
   };
 
   const deleteProduct = async (p: Product) => {
-    if (!window.confirm(t('confirmDelete'))) return;
+    const ok = await confirmDialog({ title: t('delete'), message: t('confirmDelete') });
+    if (!ok) return;
     try { await api.del(`products/${p.id}`); load(); }
     catch (e: any) { toast.error(e.message); }
   };
@@ -437,6 +440,7 @@ export default function AdminOrders() {
           )}
         </div>
       </div>
+      {confirmModal}
     </div>
   );
 }
