@@ -1,5 +1,5 @@
 import {
-  Injectable, Logger, BadRequestException, NotFoundException, ServiceUnavailableException,
+  Injectable, Logger, BadRequestException, NotFoundException, ServiceUnavailableException, OnModuleInit,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import {
@@ -27,7 +27,7 @@ export interface OrderQuery {
 }
 
 @Injectable()
-export class OrdersService {
+export class OrdersService implements OnModuleInit {
   private readonly logger = new Logger(OrdersService.name);
 
   constructor(
@@ -36,6 +36,41 @@ export class OrdersService {
     private readonly panel: PanelClient,
     private readonly payments: PaymentsService,
   ) {}
+
+  /**
+   * Réparation : avant la v1.3.1 les comptes livrés n'étaient rattachés à aucun utilisateur et n'apparaissaient donc PAS dans
+   * « Mes proxies » de l'acheteur. Au démarrage (puis toutes les 15 min tant qu'il en reste), on les rattache à leur acheteur.
+   * Silencieux si le panel est trop ancien pour accepter `owner_id` (nouvelle tentative plus tard).
+   */
+  onModuleInit() {
+    const run = () => void this.repairOwners().catch((e) => this.logger.warn(`Réparation des propriétaires : ${e?.message ?? e}`));
+    setTimeout(run, 20_000).unref();
+    setInterval(run, 15 * 60_000).unref();
+  }
+
+  private async repairOwners(): Promise<void> {
+    if (!this.panel.isConfigured()) return;
+    let fixed = 0;
+    for (const order of this.store.orders) {
+      if (order.status !== 'paid' && order.status !== 'fulfilled') continue;
+      let changed = false;
+      for (const d of order.deliveries ?? []) {
+        if (d.owner_linked || !d.panel_user_id) continue;
+        try {
+          await this.panel.setOwner(d.panel_user_id, order.user_id);
+          d.owner_linked = true;
+          changed = true;
+          fixed += 1;
+        } catch (err: any) {
+          // Compte supprimé côté panel : plus rien à rattacher. Autre erreur : on réessaiera plus tard.
+          if (/not found|introuvable/i.test(String(err?.message ?? ''))) { d.owner_linked = true; changed = true; }
+          else this.logger.debug(`Rattachement du compte ${d.username} impossible pour l'instant : ${err?.message ?? err}`);
+        }
+      }
+      if (changed) this.store.setOrder(order);
+    }
+    if (fixed > 0) this.logger.log(`${fixed} compte(s) livré(s) rattaché(s) à leur acheteur (visibles dans « Mes proxies »).`);
+  }
 
   /** Normalise une config de livraison entrante (défaut : aucune livraison). */
   private normalizeDelivery(input: any): DeliveryConfig {
@@ -470,6 +505,7 @@ export class OrdersService {
             tags: acc.tags,
             custom_proxies: acc.custom_proxies,
             pool: acc.pool,
+            owner_id: userId,
           };
           const created = await this.panel.createSubUser(spec);
           const host = endpoint.host;
@@ -483,6 +519,7 @@ export class OrdersService {
             port,
             connection: `${host}:${port}:${created.username}:${created.password}`,
             panel_user_id: created.id || undefined,
+            owner_linked: true,
           });
         }
       }

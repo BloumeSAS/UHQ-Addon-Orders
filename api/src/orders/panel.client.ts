@@ -26,6 +26,8 @@ export interface CreateSubUserSpec {
   tags?: string;
   custom_proxies?: string;
   pool?: string;
+  /** Compte panel de l'acheteur : le compte livré apparaît dans SES « Mes proxies ». */
+  owner_id?: string;
 }
 
 export interface PoolInfo {
@@ -66,6 +68,11 @@ export class PanelClient {
   async listPools(): Promise<PoolInfo[]> {
     const data = await this.call('GET', '/api/v1/common/pools');
     return Array.isArray(data?.data) ? data.data : [];
+  }
+
+  /** Rattache un compte proxy déjà créé à un utilisateur du panel (réparation des livraisons d'avant la 1.3.1). */
+  async setOwner(subUserId: string, ownerId: string): Promise<void> {
+    await this.call('POST', '/api/v1/sub-user/update', { id: subUserId, owner_id: ownerId });
   }
 
   /** Bloque (révoque) un compte proxy sur le panel — best-effort. */

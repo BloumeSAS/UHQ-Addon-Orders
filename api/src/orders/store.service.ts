@@ -58,6 +58,8 @@ export interface DeliveredAccount {
   connection: string;
   /** id du UserProxy créé côté panel (pour traçabilité). */
   panel_user_id?: string;
+  /** true = le compte est rattaché à l'acheteur (visible dans « Mes proxies »). Absent des livraisons d'avant la v1.3.1. */
+  owner_linked?: boolean;
 }
 
 /**
