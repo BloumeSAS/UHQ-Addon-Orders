@@ -25,6 +25,8 @@ export class DeliveryAccountDto {
    * CETTE liste (proxies dédiés). Vide → le compte utilise le pool partagé.
    */
   @IsOptional() @IsString() @MaxLength(20000) custom_proxies?: string;
+  /** Catégorie (ProxyPool) du panel où piocher ; vide = pool global. Ignoré si `custom_proxies` est renseigné. */
+  @IsOptional() @IsString() @MaxLength(64) pool?: string;
 }
 
 /**
@@ -60,6 +62,7 @@ export class CreateProductDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(3)
   currency?: string;
 
   /** Omis ou null → stock illimité. */
@@ -67,7 +70,8 @@ export class CreateProductDto {
   @Type(() => Number)
   @IsInt()
   @Min(0)
-  stock?: number;
+  @Max(10_000_000)
+  stock?: number | null;
 
   @IsOptional()
   @IsBoolean()
@@ -83,8 +87,9 @@ export class UpdateProductDto {
   @IsOptional() @IsString() @MaxLength(120) name?: string;
   @IsOptional() @IsString() @MaxLength(2000) description?: string;
   @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @Max(1_000_000) price?: number;
-  @IsOptional() @IsString() currency?: string;
-  @IsOptional() @Type(() => Number) @IsInt() @Min(0) stock?: number;
+  @IsOptional() @IsString() @MaxLength(3) currency?: string;
+  /** `null` = repasser en stock illimité ; omis = inchangé. */
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(10_000_000) stock?: number | null;
   @IsOptional() @IsBoolean() active?: boolean;
   @IsOptional() @ValidateNested() @Type(() => DeliveryConfigDto) delivery?: DeliveryConfigDto;
 }

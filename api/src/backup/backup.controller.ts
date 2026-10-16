@@ -1,7 +1,8 @@
 import {
-  Controller, Get, Post, Body, Headers, ForbiddenException, Logger,
+  Controller, Get, Post, Body, Headers, Logger,
 } from '@nestjs/common';
 import { StoreService } from '../orders/store.service';
+import { PanelAuthService } from '../orders/panel-auth.service';
 
 /**
  * Backup Controller — intégration avec le système de backup du panel UHQ.
@@ -20,15 +21,14 @@ import { StoreService } from '../orders/store.service';
 export class BackupController {
   private readonly logger = new Logger(BackupController.name);
 
-  constructor(private readonly store: StoreService) {}
+  constructor(
+    private readonly store: StoreService,
+    private readonly auth: PanelAuthService,
+  ) {}
 
+  /** Clé du panel obligatoire (refusé si non configurée), comparaison à temps constant. */
   private checkAuth(key: string | undefined) {
-    const expected = process.env.PANEL_API_KEY;
-    if (!expected) {
-      this.logger.warn('PANEL_API_KEY non configuré — backup non protégé');
-      return; // permissif si non configuré (dev)
-    }
-    if (key !== expected) throw new ForbiddenException('Clé API invalide');
+    this.auth.requirePanelKey(key);
   }
 
   /** GET /api/backup/export — retourne tout le catalogue + les commandes. */
@@ -53,11 +53,11 @@ export class BackupController {
     this.checkAuth(key);
 
     const products: Record<string, any> = {};
-    for (const p of body.products ?? []) products[p.id] = p;
+    for (const p of Array.isArray(body?.products) ? body.products : []) if (p && typeof p.id === 'string') products[p.id] = p;
 
     this.store.restoreData({
       products,
-      orders: body.orders ?? [],
+      orders: Array.isArray(body?.orders) ? body.orders : [],
     });
 
     this.logger.log(

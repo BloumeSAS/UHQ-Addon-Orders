@@ -40,9 +40,8 @@ export class WalletClient {
 
   /** Lit le solde d'un utilisateur. */
   async getBalance(userId: string): Promise<{ balance: number; currency: string }> {
-    // La lecture du solde est accessible à l'utilisateur lui-même (via son propre JWT).
-    // Ici on appelle l'endpoint interne pour rester cohérent avec le pattern service.
-    const data = await this.call('GET', `/api/wallet/balance?userId=${encodeURIComponent(userId)}`);
+    // Endpoint interne du Wallet (X-Panel-Key) : l'ancien /api/wallet/balance exigeait un JWT et échouait côté serveur.
+    const data = await this.call('GET', `/api/wallet/internal/balance?userId=${encodeURIComponent(userId)}`);
     return { balance: Number(data?.balance ?? 0), currency: String(data?.currency ?? 'EUR') };
   }
 

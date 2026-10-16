@@ -2,337 +2,370 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useAddon } from '../context';
-import { useT, fmt, fmtDate } from '../i18n';
-import { createApi } from '../lib/api';
+import { useT } from '../i18n';
+import { useApi, useFetch } from '../lib/api';
+import { fmtDateTime, fmtMoney } from '../lib/format';
+import { Icon } from '../components/icons';
+import { Credentials, Order, PayMethod, Product, shortId, StatusBadge, Timeline } from '../components/OrderMeta';
+import { Badge, Card, Empty, ErrorBox, Modal, Notice, PageSkeleton, SearchInput, Seg, Tabs } from '../components/ui';
 
-interface Product {
-  id: string;
-  name: string;
-  description: string | null;
-  price: number;
-  currency: string;
-  stock: number | null;
-  active: boolean;
-}
-interface OrderLine { product_id: string; name: string; unit_price: number; quantity: number; }
-interface DeliveredAccount {
-  product_name: string;
-  username: string;
-  password: string;
-  host: string;
-  port: string;
-  connection: string;
-}
-interface Order {
-  id: string;
-  items: OrderLine[];
-  total: number;
-  currency: string;
-  status: 'pending' | 'paid' | 'fulfilled' | 'cancelled';
-  deliveries?: DeliveredAccount[];
-  created_at: string;
-}
-interface Balance { balance: number; currency: string; available: boolean; }
-interface PaymentMethods {
-  wallet: boolean;
-  stripe: { enabled: boolean; publishableKey: string };
-  nowpayments: { enabled: boolean };
-}
+interface Balance { balance: number; currency: string; available: boolean }
+interface Methods { wallet: boolean; stripe: { enabled: boolean }; nowpayments: { enabled: boolean } }
 
-const STATUS_BADGE: Record<string, string> = {
-  pending: 'badge-muted', paid: 'badge-green', fulfilled: 'badge-amber', cancelled: 'badge-red',
-};
+type Tab = 'shop' | 'orders';
+type Sort = 'recent' | 'priceAsc' | 'priceDesc' | 'name';
+type OrderFilter = 'all' | 'active' | 'cancelled';
 
+/** Boutique cliente : catalogue, panier, paiement (Wallet / carte / crypto) et suivi des commandes avec identifiants livrés. */
 export default function Store() {
   const { token, lang } = useAddon();
   const t = useT();
-  const api = useMemo(() => createApi(token), [token]);
-  const [searchParams, setSearchParams] = useSearchParams();
+  const api = useApi();
+  const [params, setParams] = useSearchParams();
 
-  const [products, setProducts] = useState<Product[]>([]);
-  const [orders, setOrders]     = useState<Order[]>([]);
-  const [balance, setBalance]   = useState<Balance | null>(null);
-  const [methods, setMethods]   = useState<PaymentMethods | null>(null);
-  const [payWith, setPayWith]   = useState<'wallet' | 'stripe' | 'nowpayments'>('wallet');
-  const [cart, setCart]         = useState<Record<string, number>>({});
-  const [loading, setLoading]   = useState(true);
-  const [error, setError]       = useState('');
-  const [placing, setPlacing]   = useState(false);
-  const [copied, setCopied]     = useState<string>('');
+  const products = useFetch<{ products: Product[] }>(token ? 'products' : null);
+  const orders = useFetch<{ orders: Order[] }>(token ? 'orders' : null);
+  const balance = useFetch<Balance>(token ? 'balance' : null);
+  const methods = useFetch<Methods>(token ? 'payments/methods' : null);
 
-  // Retour d'un paiement externe (Stripe/NOWPayments) — la passerelle
-  // redirige le navigateur (hors iframe, cf. checkout()) vers CETTE page
-  // avec ?payment=success|cancelled. Le paiement lui-même est confirmé par
-  // webhook côté serveur, indépendamment de ce retour — ce dernier ne sert
-  // qu'à informer l'acheteur et rafraîchir sa liste de commandes.
+  const [tab, setTab] = useState<Tab>('shop');
+  const [search, setSearch] = useState('');
+  const [sort, setSort] = useState<Sort>('recent');
+  const [cart, setCart] = useState<Record<string, number>>({});
+  const [payWith, setPayWith] = useState<PayMethod>('wallet');
+  const [confirming, setConfirming] = useState(false);
+  const [placing, setPlacing] = useState(false);
+  const [done, setDone] = useState<Order | null>(null);
+  const [orderFilter, setOrderFilter] = useState<OrderFilter>('all');
+
+  // Retour d'un paiement externe : la passerelle redirige le navigateur vers CETTE page avec ?payment=success|cancelled.
+  // Le paiement est confirmé par webhook côté serveur, indépendamment : ce retour informe seulement l'acheteur.
   useEffect(() => {
-    const payment = searchParams.get('payment');
+    const payment = params.get('payment');
     if (!payment) return;
-    if (payment === 'success') toast.success(t('paymentReceived'));
+    if (payment === 'success') { toast.success(t('paymentReceived')); setTab('orders'); }
     else if (payment === 'cancelled') toast.info(t('paymentCancelled'));
-    searchParams.delete('payment');
-    setSearchParams(searchParams, { replace: true });
+    params.delete('payment');
+    setParams(params, { replace: true });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const copy = (text: string, key: string) => {
-    navigator.clipboard?.writeText(text).then(() => {
-      setCopied(key);
-      setTimeout(() => setCopied(''), 1500);
-    });
-  };
-
-  const load = () => {
-    Promise.all([
-      api.get<{ products: Product[] }>('products').then((d) => setProducts(d.products)),
-      api.get<{ orders: Order[] }>('orders').then((d) => setOrders(d.orders)),
-      api.get<Balance>('balance').then(setBalance).catch(() => setBalance(null)),
-      api.get<PaymentMethods>('payments/methods').then(setMethods).catch(() => setMethods(null)),
-    ])
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  };
-
+  // Commandes en attente de paiement externe : actualisation automatique tant qu'il en reste.
+  const hasPending = (orders.data?.orders ?? []).some((o) => o.status === 'pending');
   useEffect(() => {
-    if (!token) { setLoading(false); return; }
-    load();
-  }, [token]);
+    if (!hasPending) return;
+    const id = setInterval(() => { orders.reload(); balance.reload(); products.reload(); }, 8000);
+    return () => clearInterval(id);
+  }, [hasPending]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const currency = balance?.currency ?? products[0]?.currency ?? 'EUR';
-  const cartTotal = useMemo(
-    () => products.reduce((s, p) => s + (cart[p.id] ?? 0) * p.price, 0),
-    [cart, products],
-  );
-  const cartCount = Object.values(cart).reduce((s, n) => s + n, 0);
+  const list = products.data?.products ?? [];
+  const byId = useMemo(() => new Map(list.map((p) => [p.id, p])), [list]);
+  const currency = balance.data?.currency ?? list[0]?.currency ?? 'EUR';
+
+  const visible = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    let r = list.filter((p) => !q || p.name.toLowerCase().includes(q) || (p.description ?? '').toLowerCase().includes(q));
+    r = [...r].sort((a, b) => sort === 'priceAsc' ? a.price - b.price : sort === 'priceDesc' ? b.price - a.price : sort === 'name' ? a.name.localeCompare(b.name) : 0);
+    return r;
+  }, [list, search, sort]);
+
+  const lines = Object.entries(cart).map(([id, qty]) => ({ product: byId.get(id), qty })).filter((l): l is { product: Product; qty: number } => !!l.product);
+  const count = lines.reduce((s, l) => s + l.qty, 0);
+  const total = Math.round(lines.reduce((s, l) => s + l.product.price * l.qty, 0) * 100) / 100;
+  const walletDown = !!balance.data && !balance.data.available;
+  const bal = balance.data?.available ? balance.data.balance : null;
+  const missing = payWith === 'wallet' && bal !== null && total > bal ? Math.round((total - bal) * 100) / 100 : 0;
+  const stripeOn = !!methods.data?.stripe.enabled;
+  const cryptoOn = !!methods.data?.nowpayments.enabled;
+
+  // Si le Wallet est indisponible mais qu'une autre méthode l'est, on la sélectionne d'office.
+  useEffect(() => {
+    if (walletDown && payWith === 'wallet') setPayWith(stripeOn ? 'stripe' : cryptoOn ? 'nowpayments' : 'wallet');
+  }, [walletDown, stripeOn, cryptoOn]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setQty = (p: Product, qty: number) => {
-    const max = p.stock === null ? 9999 : p.stock;
-    const clamped = Math.max(0, Math.min(max, qty));
+    const max = p.stock === null ? 999 : p.stock;
+    const n = Math.max(0, Math.min(max, qty));
     setCart((c) => {
       const next = { ...c };
-      if (clamped <= 0) delete next[p.id];
-      else next[p.id] = clamped;
+      if (n <= 0) delete next[p.id]; else next[p.id] = n;
       return next;
     });
   };
 
-  const checkout = async () => {
-    const items = Object.entries(cart).map(([product_id, quantity]) => ({ product_id, quantity }));
+  // Un produit retiré / épuisé entre-temps est retiré du panier.
+  useEffect(() => {
+    setCart((c) => {
+      let changed = false;
+      const next: Record<string, number> = {};
+      for (const [id, qty] of Object.entries(c)) {
+        const p = byId.get(id);
+        if (!p || (p.stock !== null && p.stock <= 0)) { changed = true; continue; }
+        const q = p.stock === null ? qty : Math.min(qty, p.stock);
+        if (q !== qty) changed = true;
+        next[id] = q;
+      }
+      return changed ? next : c;
+    });
+  }, [byId]);
+
+  const place = async () => {
+    const items = lines.map((l) => ({ product_id: l.product.id, quantity: l.qty }));
     if (!items.length) return;
     setPlacing(true);
     try {
       if (payWith === 'wallet') {
-        await api.post('orders', { items, paymentMethod: 'wallet' });
-        toast.success(t('orderPlaced'));
+        const r = await api.post<{ order: Order }>('orders', { items, paymentMethod: 'wallet' });
         setCart({});
-        load();
+        setConfirming(false);
+        setDone(r.order);
+        orders.reload(); balance.reload(); products.reload();
         return;
       }
-
-      // Paiement externe : la passerelle (Stripe/NOWPayments) refuse d'être
-      // affichée dans une iframe (sécurité anti-clickjacking de leur côté) —
-      // on redirige donc le NAVIGATEUR ENTIER (window.top, pas cette
-      // iframe) vers sa page de paiement hébergée. successUrl/cancelUrl
-      // pointent vers CETTE page (toujours lisible, même origine que
-      // l'addon lui-même, contrairement à window.top en déploiement
-      // externe) — la passerelle y renvoie l'acheteur après paiement.
+      // Les passerelles refusent d'être affichées dans une iframe (anti-clickjacking) : on redirige le NAVIGATEUR ENTIER.
       const returnBase = window.location.href.split('?')[0];
-      const { checkoutUrl } = await api.post<{ success: boolean; order: Order; checkoutUrl?: string }>('orders', {
+      const r = await api.post<{ checkoutUrl?: string }>('orders', {
         items,
         paymentMethod: payWith,
         successUrl: `${returnBase}?payment=success`,
         cancelUrl: `${returnBase}?payment=cancelled`,
       });
-      if (!checkoutUrl) throw new Error(t('paymentUrlMissing'));
-      (window.top ?? window).location.href = checkoutUrl;
+      if (!r.checkoutUrl) throw new Error(t('paymentUrlMissing'));
+      (window.top ?? window).location.href = r.checkoutUrl;
     } catch (e: any) {
       toast.error(e.message);
+      products.reload();
     } finally {
       setPlacing(false);
     }
   };
 
-  if (!token)  return <div className="page"><div className="empty">{t('noToken')}</div></div>;
-  if (loading) return <div className="page"><div className="loading">{t('loading')}</div></div>;
-  if (error)   return <div className="page"><div className="alert alert-error">{error}</div></div>;
+  if (!token) return <div className="page"><Empty icon="key" title={t('noToken')} text={t('noTokenText')} /></div>;
+  if ((products.loading && !products.data) || (orders.loading && !orders.data)) return <div className="page"><PageSkeleton /></div>;
+  if (products.error && !products.data) return <div className="page"><ErrorBox message={products.error} onRetry={products.reload} /></div>;
 
-  const walletDown = balance && !balance.available;
+  const allOrders = orders.data?.orders ?? [];
+  const shownOrders = allOrders.filter((o) => orderFilter === 'all' ? true : orderFilter === 'cancelled' ? o.status === 'cancelled' : o.status !== 'cancelled');
+  const pendingCount = allOrders.filter((o) => o.status === 'pending').length;
 
   return (
-    <div className="page">
-      {/* En-tête : titre + solde */}
-      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-        <h1 className="section-title" style={{ marginBottom: 0 }}>{t('store')}</h1>
-        {balance?.available && (
-          <span className="balance-pill">
-            {t('myBalance')} : {fmt(balance.balance, balance.currency, lang)}
-          </span>
+    <div className="page stack">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">{t('store')}</h1>
+          <p className="page-sub">{t('storeSub')}</p>
+        </div>
+        {balance.data?.available && (
+          <div className="card card-sm row gap-3" style={{ flexWrap: 'nowrap' }}>
+            <span className="avatar"><Icon name="wallet" size={16} /></span>
+            <div>
+              <div className="stat-label" style={{ marginBottom: 0 }}>{t('myBalance')}</div>
+              <div className="text-bold" style={{ fontSize: '1.05rem' }}>{fmtMoney(balance.data.balance, balance.data.currency, lang)}</div>
+            </div>
+          </div>
         )}
       </div>
 
-      {walletDown && (
-        <div className="alert alert-warn mb-4">{t('walletRequired')}</div>
-      )}
+      {walletDown && <Notice tone="warn">{stripeOn || cryptoOn ? t('walletDownAlt') : t('walletRequired')}</Notice>}
 
-      {/* Catalogue */}
-      <div className="section-title" style={{ fontSize: '1rem' }}>{t('catalog')}</div>
-      {products.length === 0 ? (
-        <div className="card empty">{t('noProducts')}</div>
-      ) : (
-        <div className="product-grid mb-4">
-          {products.map((p) => {
-            const qty = cart[p.id] ?? 0;
-            const soldOut = p.stock !== null && p.stock <= 0;
-            return (
-              <div key={p.id} className="card product">
-                <div className="product-name">{p.name}</div>
-                {p.description && <div className="product-desc">{p.description}</div>}
-                <div className="flex items-center justify-between">
-                  <span className="product-price">{fmt(p.price, p.currency, lang)}</span>
-                  {p.stock !== null && (
-                    <span className={`badge ${soldOut ? 'badge-red' : 'badge-muted'}`}>
-                      {soldOut ? t('outOfStock') : `${p.stock} ${t('available')}`}
-                    </span>
-                  )}
-                </div>
-                {soldOut ? (
-                  <button className="btn btn-outline btn-block" disabled>{t('outOfStock')}</button>
-                ) : qty > 0 ? (
-                  <div className="form-row" style={{ justifyContent: 'center' }}>
-                    <button className="btn btn-sm btn-outline" onClick={() => setQty(p, qty - 1)} aria-label={`${t('decrease')} ${p.name}`}>−</button>
-                    <span className="text-bold" style={{ minWidth: 28, textAlign: 'center' }} aria-live="polite">{qty}</span>
-                    <button className="btn btn-sm btn-outline" onClick={() => setQty(p, qty + 1)} aria-label={`${t('increase')} ${p.name}`}>+</button>
-                  </div>
-                ) : (
-                  <button
-                    className="btn btn-primary btn-block"
-                    disabled={!!walletDown}
-                    onClick={() => setQty(p, 1)}
-                  >
-                    {t('addToCart')}
-                  </button>
-                )}
+      <Tabs<Tab>
+        value={tab}
+        onChange={setTab}
+        tabs={[
+          { id: 'shop', label: t('catalog'), icon: 'store' },
+          { id: 'orders', label: t('myOrders'), icon: 'receipt', count: pendingCount || undefined },
+        ]}
+      />
+
+      {tab === 'shop' && (
+        <div className="two-col">
+          <div className="stack">
+            {list.length > 0 && (
+              <div className="row">
+                <SearchInput value={search} onChange={setSearch} placeholder={t('searchProducts')} />
+                <select className="input" style={{ width: 'auto' }} value={sort} onChange={(e) => setSort(e.target.value as Sort)} aria-label={t('sortBy')}>
+                  <option value="recent">{t('sort.recent')}</option>
+                  <option value="priceAsc">{t('sort.priceAsc')}</option>
+                  <option value="priceDesc">{t('sort.priceDesc')}</option>
+                  <option value="name">{t('sort.name')}</option>
+                </select>
               </div>
-            );
-          })}
-        </div>
-      )}
+            )}
 
-      {/* Panier */}
-      {cartCount > 0 && (
-        <div className="card mb-4" style={{ background: 'var(--bg2)' }}>
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-bold">{t('cart')} ({cartCount})</span>
-            <span className="product-price">{fmt(cartTotal, currency, lang)}</span>
-          </div>
-
-          {/* Méthode de paiement — solde Wallet toujours proposé (si dispo),
-              carte/crypto seulement si l'admin les a activées côté addon. */}
-          {(methods?.stripe.enabled || methods?.nowpayments.enabled) && (
-            <div className="form-row mb-2" role="radiogroup" aria-label={t('payWith')}>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={payWith === 'wallet'}
-                className={`btn btn-sm ${payWith === 'wallet' ? 'btn-primary' : 'btn-outline'}`}
-                onClick={() => setPayWith('wallet')}
-                disabled={!!walletDown}
-              >
-                {t('payWithWallet')}
-              </button>
-              {methods?.stripe.enabled && (
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={payWith === 'stripe'}
-                  className={`btn btn-sm ${payWith === 'stripe' ? 'btn-primary' : 'btn-outline'}`}
-                  onClick={() => setPayWith('stripe')}
-                >
-                  {t('payWithCard')}
-                </button>
-              )}
-              {methods?.nowpayments.enabled && (
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={payWith === 'nowpayments'}
-                  className={`btn btn-sm ${payWith === 'nowpayments' ? 'btn-primary' : 'btn-outline'}`}
-                  onClick={() => setPayWith('nowpayments')}
-                >
-                  {t('payWithCrypto')}
-                </button>
-              )}
-            </div>
-          )}
-
-          <button
-            className="btn btn-primary btn-block"
-            onClick={checkout}
-            disabled={placing || (payWith === 'wallet' && !!walletDown)}
-          >
-            {placing ? '…' : `${t('orderNow')} — ${fmt(cartTotal, currency, lang)}`}
-          </button>
-        </div>
-      )}
-
-      {/* Mes commandes */}
-      <div className="section-title" style={{ fontSize: '1rem' }}>{t('myOrders')}</div>
-      <div className="card" style={{ padding: 0 }}>
-        {orders.length === 0 ? (
-          <div className="empty">{t('noOrders')}</div>
-        ) : (
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>{t('date')}</th>
-                  <th>{t('items')}</th>
-                  <th>{t('total')}</th>
-                  <th>{t('status')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orders.map((o) => {
-                  const deliveries = o.deliveries ?? [];
-                  const showCreds = deliveries.length > 0 && o.status !== 'cancelled';
+            {list.length === 0 ? (
+              <Card><Empty icon="store" title={t('emptyShopTitle')} text={t('emptyShopText')} /></Card>
+            ) : visible.length === 0 ? (
+              <Card><Empty icon="search" title={t('noResults')} text={t('noResultsText')} action={<button className="btn btn-outline btn-sm" onClick={() => setSearch('')}>{t('resetFilters')}</button>} /></Card>
+            ) : (
+              <div className="product-grid">
+                {visible.map((p) => {
+                  const qty = cart[p.id] ?? 0;
+                  const soldOut = p.stock !== null && p.stock <= 0;
+                  const low = p.stock !== null && p.stock > 0 && p.stock <= 5;
                   return (
-                    <>
-                      <tr key={o.id}>
-                        <td className="mono">{fmtDate(o.created_at, lang)}</td>
-                        <td className="text-sm">{o.items.map((l) => `${l.quantity}× ${l.name}`).join(', ')}</td>
-                        <td className="text-bold">{fmt(o.total, o.currency, lang)}</td>
-                        <td><span className={`badge ${STATUS_BADGE[o.status]}`}>{t(o.status)}</span></td>
-                      </tr>
-                      {showCreds && (
-                        <tr key={`${o.id}-creds`}>
-                          <td colSpan={4} style={{ background: 'var(--bg2)' }}>
-                            <div className="text-sm text-bold mb-2">🔑 {t('deliveredProxies')}</div>
-                            <div className="space-y-2">
-                              {deliveries.map((d, i) => (
-                                <div key={i} className="flex items-center gap-2 flex-wrap">
-                                  <code className="mono" style={{ background: 'var(--bg)', padding: '2px 8px', borderRadius: 6, fontSize: '0.85em' }}>
-                                    {d.connection}
-                                  </code>
-                                  <button
-                                    className="btn btn-sm btn-outline"
-                                    onClick={() => copy(d.connection, `${o.id}-${i}`)}
-                                    aria-label={`${t('copy')}: ${d.connection}`}
-                                  >
-                                    <span aria-live="polite">{copied === `${o.id}-${i}` ? `✓ ${t('copied')}` : t('copy')}</span>
-                                  </button>
-                                </div>
-                              ))}
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </>
+                    <article key={p.id} className={`card product ${qty > 0 ? 'in-cart' : ''}`}>
+                      <div className="row-between" style={{ alignItems: 'flex-start' }}>
+                        <div className="product-icon"><Icon name={p.delivery?.mode === 'panel_account' ? 'zap' : 'package'} size={20} /></div>
+                        {soldOut ? <Badge tone="bad">{t('outOfStock')}</Badge> : low ? <Badge tone="warn">{t('lastUnits', { n: p.stock })}</Badge> : p.delivery?.mode === 'panel_account' ? <Badge tone="good" icon="zap">{t('instantDelivery')}</Badge> : null}
+                      </div>
+                      <div>
+                        <h3 className="product-name">{p.name}</h3>
+                        <p className="product-desc" style={{ marginTop: 4 }}>{p.description || t('noDescription')}</p>
+                      </div>
+                      <div className="row-between">
+                        <span className="product-price">{fmtMoney(p.price, p.currency, lang)}</span>
+                        {qty > 0 ? (
+                          <div className="stepper" role="group" aria-label={p.name}>
+                            <button onClick={() => setQty(p, qty - 1)} aria-label={`${t('decrease')} ${p.name}`}>−</button>
+                            <span aria-live="polite">{qty}</span>
+                            <button onClick={() => setQty(p, qty + 1)} disabled={p.stock !== null && qty >= p.stock} aria-label={`${t('increase')} ${p.name}`}>+</button>
+                          </div>
+                        ) : (
+                          <button className="btn btn-primary" disabled={soldOut} onClick={() => setQty(p, 1)}><Icon name="plus" size={14} />{t('addToCart')}</button>
+                        )}
+                      </div>
+                    </article>
                   );
                 })}
-              </tbody>
-            </table>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+
+          {/* Panier */}
+          <aside className="cart-panel">
+            <Card title={<span className="row gap-2"><Icon name="cart" size={16} />{t('cart')}{count > 0 && <Badge tone="primary">{count}</Badge>}</span>}>
+              {lines.length === 0 ? (
+                <div className="text-sm text-muted" style={{ padding: '0.8rem 0' }}>{t('emptyCart')}<br />{t('emptyCartHint')}</div>
+              ) : (
+                <div className="stack-sm">
+                  <div>
+                    {lines.map(({ product: p, qty }) => (
+                      <div key={p.id} className="cart-line">
+                        <div className="grow">
+                          <div className="text-bold truncate">{p.name}</div>
+                          <div className="text-xs text-muted">{qty} × {fmtMoney(p.price, p.currency, lang)}</div>
+                        </div>
+                        <b className="num">{fmtMoney(p.price * qty, p.currency, lang)}</b>
+                        <button className="btn btn-ghost btn-icon btn-sm" onClick={() => setQty(p, 0)} aria-label={`${t('remove')} ${p.name}`}><Icon name="trash" size={14} /></button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="row-between"><span className="text-muted">{t('total')}</span><b style={{ fontSize: '1.25rem' }}>{fmtMoney(total, currency, lang)}</b></div>
+
+                  {(stripeOn || cryptoOn) && (
+                    <div className="stack-sm" role="radiogroup" aria-label={t('payWith')}>
+                      <div className="label">{t('payWith')}</div>
+                      <button type="button" role="radio" aria-checked={payWith === 'wallet'} className={`pay-option ${payWith === 'wallet' ? 'active' : ''}`} disabled={walletDown} onClick={() => setPayWith('wallet')}>
+                        <span className="pay-radio" /><Icon name="wallet" size={17} /><span className="grow"><b>{t('pay.wallet')}</b><div className="text-xs text-muted">{bal !== null ? t('available', { v: fmtMoney(bal, currency, lang) }) : t('unavailable')}</div></span>
+                      </button>
+                      {stripeOn && (
+                        <button type="button" role="radio" aria-checked={payWith === 'stripe'} className={`pay-option ${payWith === 'stripe' ? 'active' : ''}`} onClick={() => setPayWith('stripe')}>
+                          <span className="pay-radio" /><Icon name="card" size={17} /><span className="grow"><b>{t('pay.stripe')}</b><div className="text-xs text-muted">{t('redirectSecure')}</div></span>
+                        </button>
+                      )}
+                      {cryptoOn && (
+                        <button type="button" role="radio" aria-checked={payWith === 'nowpayments'} className={`pay-option ${payWith === 'nowpayments' ? 'active' : ''}`} onClick={() => setPayWith('nowpayments')}>
+                          <span className="pay-radio" /><Icon name="coins" size={17} /><span className="grow"><b>{t('pay.nowpayments')}</b><div className="text-xs text-muted">{t('redirectSecure')}</div></span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {payWith === 'wallet' && bal !== null && (
+                    <div className="section-box text-sm">
+                      <div className="row-between"><span className="text-muted">{t('myBalance')}</span><b>{fmtMoney(bal, currency, lang)}</b></div>
+                      <div className="row-between mt-1"><span className="text-muted">{t('afterOrder')}</span><b className={missing ? 'text-red' : ''}>{fmtMoney(bal - total, currency, lang)}</b></div>
+                    </div>
+                  )}
+                  {missing > 0 && <Notice tone="error">{t('missingFunds', { v: fmtMoney(missing, currency, lang) })}</Notice>}
+
+                  <button className="btn btn-primary btn-lg btn-block" onClick={() => setConfirming(true)} disabled={placing || missing > 0 || (payWith === 'wallet' && walletDown)}>
+                    {t('orderNow')} — {fmtMoney(total, currency, lang)}
+                  </button>
+                  <button className="btn btn-ghost btn-sm btn-block" onClick={() => setCart({})}>{t('clearCart')}</button>
+                </div>
+              )}
+            </Card>
+          </aside>
+        </div>
+      )}
+
+      {tab === 'orders' && (
+        <div className="stack">
+          {allOrders.length > 0 && (
+            <div className="row-between">
+              <Seg<OrderFilter> label={t('filter')} value={orderFilter} onChange={setOrderFilter} options={[{ id: 'all', label: t('filter.all') }, { id: 'active', label: t('filter.active') }, { id: 'cancelled', label: t('filter.cancelled') }]} />
+              <button className="btn btn-outline btn-sm" onClick={() => { orders.reload(); balance.reload(); }}><Icon name="refresh" size={14} />{t('ui.refresh')}</button>
+            </div>
+          )}
+          {pendingCount > 0 && <Notice tone="info">{t('pendingNotice')}</Notice>}
+
+          {allOrders.length === 0 ? (
+            <Card>
+              <Empty icon="receipt" title={t('noOrdersTitle')} text={t('noOrdersText')} action={<button className="btn btn-primary" onClick={() => setTab('shop')}><Icon name="store" size={15} />{t('browseShop')}</button>} />
+            </Card>
+          ) : shownOrders.length === 0 ? (
+            <Card><Empty icon="search" title={t('noResults')} /></Card>
+          ) : (
+            shownOrders.map((o) => (
+              <article key={o.id} className="card order-card">
+                <div className="order-head">
+                  <div>
+                    <b>{shortId(o.id)}</b>
+                    <span className="text-muted text-sm"> · {fmtDateTime(o.created_at, lang)}</span>
+                  </div>
+                  <div className="row"><StatusBadge status={o.status} /><b>{fmtMoney(o.total, o.currency, lang)}</b></div>
+                </div>
+                <div className="order-body stack-sm">
+                  <ul style={{ listStyle: 'none' }}>
+                    {o.items.map((l, i) => (
+                      <li key={i} className="row-between text-sm" style={{ padding: '0.15rem 0' }}>
+                        <span>{l.quantity} × {l.name}</span>
+                        <span className="text-muted">{fmtMoney(l.unit_price * l.quantity, o.currency, lang)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <Timeline order={o} />
+                  {o.status === 'pending' && <Notice tone="info" icon="clock">{t('pendingOne')}</Notice>}
+                  {o.status === 'cancelled' && <div className="text-sm text-muted">{t('cancelledNote')}</div>}
+                  {(o.deliveries?.length ?? 0) > 0 && o.status !== 'cancelled' && <Credentials deliveries={o.deliveries!} filename={`proxies-${shortId(o.id).slice(1)}.txt`} />}
+                </div>
+              </article>
+            ))
+          )}
+        </div>
+      )}
+
+      {confirming && (
+        <Modal
+          title={t('confirmOrder')}
+          onClose={() => setConfirming(false)}
+          busy={placing}
+          footer={
+            <>
+              <button className="btn btn-outline" onClick={() => setConfirming(false)} disabled={placing}>{t('ui.cancel')}</button>
+              <button className="btn btn-primary" onClick={place} disabled={placing}>{placing ? '…' : payWith === 'wallet' ? t('payNow', { v: fmtMoney(total, currency, lang) }) : t('goToPayment')}</button>
+            </>
+          }
+        >
+          <div className="stack-sm">
+            {lines.map(({ product: p, qty }) => (
+              <div key={p.id} className="row-between text-sm"><span>{qty} × {p.name}</span><b>{fmtMoney(p.price * qty, p.currency, lang)}</b></div>
+            ))}
+            <div className="row-between" style={{ borderTop: '1px solid var(--border)', paddingTop: '0.6rem' }}><b>{t('total')}</b><b style={{ fontSize: '1.15rem' }}>{fmtMoney(total, currency, lang)}</b></div>
+            <Notice tone="info">{payWith === 'wallet' ? t('confirmWalletText', { v: fmtMoney(total, currency, lang) }) : t('confirmExternalText')}</Notice>
+            {lines.some((l) => l.product.delivery?.mode === 'panel_account') && <div className="text-xs text-muted">{t('autoDeliveryNote')}</div>}
+          </div>
+        </Modal>
+      )}
+
+      {done && (
+        <Modal title={t('orderDoneTitle')} onClose={() => setDone(null)} footer={<><button className="btn btn-outline" onClick={() => { setDone(null); setTab('orders'); }}>{t('viewOrders')}</button><button className="btn btn-primary" onClick={() => setDone(null)}>{t('ui.close')}</button></>}>
+          <div className="stack-sm">
+            <Notice tone="success">{t('orderDoneText', { id: shortId(done.id), v: fmtMoney(done.total, done.currency, lang) })}</Notice>
+            {(done.deliveries?.length ?? 0) > 0 ? <Credentials deliveries={done.deliveries!} filename={`proxies-${shortId(done.id).slice(1)}.txt`} /> : <div className="text-sm text-muted">{t('noAutoDelivery')}</div>}
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

@@ -71,6 +71,10 @@ export type PaymentMethod = 'wallet' | 'stripe' | 'nowpayments';
 export interface OrderRecord {
   id: string;
   user_id: string;
+  /** E-mail du client au moment de la commande (affichage admin). */
+  user_email?: string;
+  /** true = le stock est déjà réservé pour cette commande (absent des commandes d'avant la v1.3.0). */
+  stock_reserved?: boolean;
   items: OrderItem[];
   total: number;
   currency: string;
@@ -126,6 +130,7 @@ export class StoreService implements OnModuleInit {
   private readonly logger = new Logger(StoreService.name);
   private readonly dbPath: string;
   private data: StoreData = { products: {}, orders: [], paymentSettings: { ...EMPTY_PAYMENT_SETTINGS } };
+  private readOnly = false;
 
   constructor() {
     // Racine de l'addon = deux niveaux au-dessus de api/
@@ -149,7 +154,16 @@ export class StoreService implements OnModuleInit {
         this.logger.log(`Nouveau fichier créé : ${this.dbPath}`);
       }
     } catch (err) {
-      this.logger.warn(`Impossible de lire ${this.dbPath} — démarrage avec données vides`);
+      // Fichier illisible : ne JAMAIS repartir à vide puis l'écraser à la prochaine écriture (perte du catalogue,
+      // des commandes et des clés de paiement). On le met de côté pour une récupération manuelle.
+      const aside = `${this.dbPath}.corrupt-${Date.now()}`;
+      try {
+        fs.renameSync(this.dbPath, aside);
+        this.logger.error(`${this.dbPath} illisible — conservé sous ${aside} ; démarrage avec des données vides.`);
+      } catch {
+        this.logger.error(`${this.dbPath} illisible et impossible à mettre de côté — écritures désactivées pour ne rien écraser.`);
+        this.readOnly = true;
+      }
     }
   }
 
@@ -214,9 +228,11 @@ export class StoreService implements OnModuleInit {
   // ─── Persistance ─────────────────────────────────────────────────────────────
 
   private persist(): void {
+    if (this.readOnly) return;
     const tmp = this.dbPath + '.tmp';
     try {
-      fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2), 'utf8');
+      // 0600 : le fichier contient les clés des passerelles de paiement.
+      fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2), { encoding: 'utf8', mode: 0o600 });
       fs.renameSync(tmp, this.dbPath);
     } catch (err) {
       this.logger.error('Erreur de persistance :', err);

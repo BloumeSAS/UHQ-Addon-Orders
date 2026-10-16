@@ -4,7 +4,7 @@ import {
 import { Request, Response } from 'express';
 import { OrdersService } from './orders.service';
 import { PaymentsService } from './payments/payments.service';
-import { authenticate, requireAdmin } from './auth';
+import { PanelAuthService } from './panel-auth.service';
 import {
   CreateProductDto, UpdateProductDto, PlaceOrderDto, OrderStatusDto, UpdatePaymentSettingsDto,
 } from './dto/orders.dto';
@@ -14,6 +14,7 @@ export class OrdersController {
   constructor(
     private readonly orders: OrdersService,
     private readonly payments: PaymentsService,
+    private readonly auth: PanelAuthService,
   ) {}
 
   // ─── Wallet status ───────────────────────────────────────────────────────────
@@ -21,21 +22,21 @@ export class OrdersController {
   /** GET /api/wallet-status — l'addon Wallet est-il joignable / configuré ? */
   @Get('wallet-status')
   async walletStatus(@Req() req: Request) {
-    authenticate(req);
+    await this.auth.authenticate(req);
     return this.orders.walletStatus();
   }
 
   /** GET /api/balance — solde de l'utilisateur courant (proxy vers Wallet) */
   @Get('balance')
   async balance(@Req() req: Request) {
-    const { sub } = authenticate(req);
-    return this.orders.getUserBalance(sub);
+    const user = await this.auth.authenticate(req);
+    return this.orders.getUserBalance(user.id);
   }
 
   /** GET /api/pools — catégories (ProxyPool) déclarées sur le panel (ADMIN). */
   @Get('pools')
   async listPools(@Req() req: Request) {
-    requireAdmin(req);
+    await this.auth.requireAdmin(req);
     return { pools: await this.orders.listPools() };
   }
 
@@ -43,43 +44,70 @@ export class OrdersController {
 
   /** GET /api/products — catalogue (actifs ; admin : ?all=true inclut inactifs) */
   @Get('products')
-  listProducts(@Req() req: Request, @Query('all') all?: string) {
-    const payload = authenticate(req);
-    const includeInactive = payload.role === 'ADMIN' && all === 'true';
-    return { products: this.orders.listProducts(includeInactive) };
+  async listProducts(@Req() req: Request, @Query('all') all?: string) {
+    const user = await this.auth.authenticate(req);
+    const isAdmin = user.role === 'ADMIN';
+    const list = this.orders.listProducts(isAdmin && all === 'true');
+    // Les clients ne reçoivent jamais la configuration de livraison (listes de proxies privés, réglages internes).
+    return { products: isAdmin ? list : list.map((p) => this.orders.toPublic(p)) };
   }
 
   /** POST /api/products — créer un produit (ADMIN) */
   @Post('products')
   @HttpCode(200)
-  createProduct(@Req() req: Request, @Body() dto: CreateProductDto) {
-    requireAdmin(req);
-    return { product: this.orders.createProduct(dto) };
+  async createProduct(@Req() req: Request, @Body() dto: CreateProductDto) {
+    await this.auth.requireAdmin(req);
+    return { product: await this.orders.createProduct(dto) };
   }
 
   /** PATCH /api/products/:id — modifier un produit (ADMIN) */
   @Patch('products/:id')
-  updateProduct(@Req() req: Request, @Param('id') id: string, @Body() dto: UpdateProductDto) {
-    requireAdmin(req);
-    return { product: this.orders.updateProduct(id, dto) };
+  async updateProduct(@Req() req: Request, @Param('id') id: string, @Body() dto: UpdateProductDto) {
+    await this.auth.requireAdmin(req);
+    return { product: await this.orders.updateProduct(id, dto) };
   }
 
   /** DELETE /api/products/:id — supprimer un produit (ADMIN) */
   @Delete('products/:id')
-  deleteProduct(@Req() req: Request, @Param('id') id: string) {
-    requireAdmin(req);
+  async deleteProduct(@Req() req: Request, @Param('id') id: string) {
+    await this.auth.requireAdmin(req);
     this.orders.deleteProduct(id);
     return { success: true };
   }
 
   // ─── Orders ────────────────────────────────────────────────────────────────
 
-  /** GET /api/orders — commandes de l'utilisateur (admin : ?all=true → toutes) */
+  /**
+   * GET /api/orders — commandes de l'utilisateur. Admin : `?all=true` → toutes, avec `status`, `q` (client, produit, id),
+   * `limit` / `offset` (réponse `{ orders, total }` ; sans `limit`, toutes les commandes).
+   */
   @Get('orders')
-  listOrders(@Req() req: Request, @Query('all') all?: string) {
-    const payload = authenticate(req);
-    const seeAll = payload.role === 'ADMIN' && all === 'true';
-    return { orders: seeAll ? this.orders.allOrders() : this.orders.userOrders(payload.sub) };
+  async listOrders(
+    @Req() req: Request,
+    @Query('all') all?: string,
+    @Query('status') status?: string,
+    @Query('q') q?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    const user = await this.auth.authenticate(req);
+    if (user.role === 'ADMIN' && all === 'true') {
+      return this.orders.queryOrders({
+        status,
+        q: typeof q === 'string' ? q.slice(0, 100) : undefined,
+        limit: limit ? Number(limit) : undefined,
+        offset: offset ? Number(offset) : undefined,
+      });
+    }
+    const orders = this.orders.userOrders(user.id);
+    return { orders, total: orders.length };
+  }
+
+  /** GET /api/stats — indicateurs de la boutique (ADMIN). */
+  @Get('stats')
+  async stats(@Req() req: Request) {
+    await this.auth.requireAdmin(req);
+    return this.orders.stats();
   }
 
   /**
@@ -92,9 +120,9 @@ export class OrdersController {
   @Post('orders')
   @HttpCode(200)
   async placeOrder(@Req() req: Request, @Body() dto: PlaceOrderDto) {
-    const { sub } = authenticate(req);
+    const user = await this.auth.authenticate(req);
     const { order, checkoutUrl } = await this.orders.checkout(
-      sub, dto.items, dto.paymentMethod ?? 'wallet', dto.successUrl, dto.cancelUrl,
+      { id: user.id, email: user.email }, dto.items, dto.paymentMethod ?? 'wallet', dto.successUrl, dto.cancelUrl,
     );
     return { success: true, order, checkoutUrl };
   }
@@ -102,9 +130,9 @@ export class OrdersController {
   /** PATCH /api/orders/:id/status — changer le statut (ADMIN) ; annulation = remboursement */
   @Patch('orders/:id/status')
   async updateStatus(@Req() req: Request, @Param('id') id: string, @Body() dto: OrderStatusDto) {
-    requireAdmin(req);
-    const order = await this.orders.updateStatus(id, dto.status);
-    return { success: true, order };
+    await this.auth.requireAdmin(req);
+    const { order, manualRefundRequired } = await this.orders.updateStatus(id, dto.status);
+    return { success: true, order, manualRefundRequired };
   }
 
   // ─── Paiement : méthodes disponibles + réglages (ADMIN) ─────────────────────
@@ -112,22 +140,22 @@ export class OrdersController {
   /** GET /api/payments/methods — quelles passerelles sont actives (jamais de secret exposé). */
   @Get('payments/methods')
   async paymentMethods(@Req() req: Request) {
-    authenticate(req);
+    await this.auth.authenticate(req);
     return this.payments.availableMethods();
   }
 
   /** GET /api/payments/settings — réglages passerelles (secrets masqués, ADMIN). */
   @Get('payments/settings')
-  getPaymentSettings(@Req() req: Request) {
-    requireAdmin(req);
+  async getPaymentSettings(@Req() req: Request) {
+    await this.auth.requireAdmin(req);
     return this.payments.getSettingsMasked();
   }
 
   /** PUT /api/payments/settings — met à jour les réglages (ADMIN). */
   @Post('payments/settings')
   @HttpCode(200)
-  updatePaymentSettings(@Req() req: Request, @Body() dto: UpdatePaymentSettingsDto) {
-    requireAdmin(req);
+  async updatePaymentSettings(@Req() req: Request, @Body() dto: UpdatePaymentSettingsDto) {
+    await this.auth.requireAdmin(req);
     return this.payments.updateSettings(dto);
   }
 
@@ -137,8 +165,8 @@ export class OrdersController {
    * publiquement), après confirmation du mot de passe admin côté panel.
    */
   @Get('payments/settings/reveal')
-  revealPaymentSecret(@Req() req: Request, @Query('key') key: string) {
-    requireAdmin(req);
+  async revealPaymentSecret(@Req() req: Request, @Query('key') key: string) {
+    await this.auth.requireAdmin(req);
     return { value: this.payments.revealSecret(key) };
   }
 

@@ -19,7 +19,8 @@ if (fs.existsSync(envPath)) {
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
-    cors: { origin: '*', credentials: false },
+    // Pas de CORS : l'interface est servie par CET addon (même origine que son API).
+    cors: false,
     logger: ['error', 'warn', 'log'],
     bodyParser: false,
   });
@@ -30,6 +31,12 @@ async function bootstrap() {
   // AVANT le parseur JSON global ci-dessous (ordre des `app.use()`).
   app.use('/api/payments/stripe/webhook', raw({ type: 'application/json' }));
   app.use('/api/payments/nowpayments/webhook', raw({ type: 'application/json' }));
+  (app.getHttpAdapter().getInstance() as any).disable('x-powered-by');
+  app.use((_req: any, res: any, next: any) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
   app.use(json({ limit: '2mb' }));
 
   app.useGlobalPipes(

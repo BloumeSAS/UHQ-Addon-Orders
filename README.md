@@ -130,6 +130,22 @@ Authentification : `Authorization: Bearer <jwt-panel>` (passé par le panel).
 
 ---
 
+## Sécurité (v1.3.0)
+
+- **Jetons vérifiés par le panel** (comme le Wallet) : un jeton falsifié est refusé. Avant la 1.3.0, un jeton `{"role":"ADMIN"}` non signé suffisait pour créer des produits ou annuler/rembourser des commandes. **Mettez à jour** (ainsi que le Wallet).
+- **Les clients ne voient plus la configuration de livraison** : `GET /api/products` ne renvoie aux non-admins que le mode (livraison automatique ou non) — jamais les listes de proxies privés ni les réglages internes.
+- Stock **réservé immédiatement** à la commande (deux clients ne peuvent plus acheter la dernière unité en même temps) et rendu en cas d'échec ou d'annulation.
+- Annulation d'une commande payée : **refusée si le Wallet est injoignable** (avant : remboursement silencieusement perdu) ; transitions de statut contrôlées (jamais de retour depuis « annulée ») ; livraison partielle → comptes déjà créés bloqués puis remboursement.
+- Solde du client lu via l'endpoint interne du Wallet (l'ancien appel échouait : le solde n'apparaissait pas dans la boutique).
+- Clés de passerelles de paiement : fichier de données en mode `0600`, aucun CORS, sauvegarde protégée par la clé du panel (obligatoire).
+
+## Corrections et nouveautés v1.3.0
+
+- **Création de produit avec une catégorie** : `delivery.account.property pool should not exist` corrigé ; la catégorie est vérifiée auprès du panel à l'enregistrement.
+- Repasser un produit en **stock illimité** est possible ; le trafic max se saisit en **Go décimaux** (comme le panel).
+- **Boutique cliente** : catalogue avec recherche/tri, indicateurs de stock, panier avec solde après commande et montant manquant, choix du moyen de paiement, confirmation avant paiement, accès livrés (mot de passe masqué, copie, téléchargement .txt), suivi des commandes avec frise, rafraîchissement automatique des paiements en attente, états vides.
+- **Gestion admin** : indicateurs (chiffre d'affaires, commandes à traiter, stock faible), produits (formulaire guidé avec validation, aperçu client, duplication, activation en un clic), commandes (recherche, filtres, pagination, détail, annulation/remboursement avec explication), état des moyens de paiement, export CSV.
+
 ## Licence
 
 MIT — © 2026 Bloume SAS
