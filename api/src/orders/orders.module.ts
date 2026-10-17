@@ -4,11 +4,12 @@ import { PanelAuthService } from './panel-auth.service';
 import { WalletClient } from './wallet.client';
 import { PanelClient } from './panel.client';
 import { PaymentsService } from './payments/payments.service';
+import { InvoiceService } from './invoice/invoice.service';
 import { OrdersService } from './orders.service';
 import { OrdersController } from './orders.controller';
 
 @Module({
-  providers: [StoreService, PanelAuthService, WalletClient, PanelClient, PaymentsService, OrdersService],
+  providers: [StoreService, PanelAuthService, WalletClient, PanelClient, PaymentsService, InvoiceService, OrdersService],
   controllers: [OrdersController],
   exports: [StoreService, PanelAuthService],
 })

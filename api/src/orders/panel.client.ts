@@ -75,6 +75,18 @@ export class PanelClient {
     await this.call('POST', '/api/v1/sub-user/update', { id: subUserId, owner_id: ownerId });
   }
 
+  /** Lit un compte proxy (quota actuel — `traffic_limit` en octets, null = illimité). */
+  async getSubUser(id: string): Promise<{ traffic_limit: number | null; expires_at: string | null }> {
+    const data = await this.call('GET', `/api/v1/sub-user/get?id=${encodeURIComponent(id)}`);
+    const d = data?.data ?? {};
+    return { traffic_limit: d.traffic_limit ?? null, expires_at: d.expires_at ?? null };
+  }
+
+  /** Met à jour un compte proxy (renouvellement : nouvelle expiration + quota cumulé). */
+  async updateSubUser(id: string, patch: { expires_at?: string; traffic_limit_bytes?: number }): Promise<void> {
+    await this.call('POST', '/api/v1/sub-user/update', { id, ...patch });
+  }
+
   /** Bloque (révoque) un compte proxy sur le panel — best-effort. */
   async blockSubUser(id: string): Promise<void> {
     if (!id) return;

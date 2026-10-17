@@ -3,12 +3,12 @@ import { toast } from 'sonner';
 import { useAddon } from '../context';
 import { useT } from '../i18n';
 import { createApi, useApi, useDebounced, useFetch } from '../lib/api';
-import { downloadFile, fmtDateTime, fmtMoney, toCsv } from '../lib/format';
+import { downloadBlob, downloadFile, fmtDateTime, fmtMoney, toCsv } from '../lib/format';
 import { Icon } from '../components/icons';
 import { Credentials, DeliveryAccount, Order, OrderStatus, PaymentBadge, Product, shortId, StatusBadge, Timeline } from '../components/OrderMeta';
 import { Badge, Card, Empty, ErrorBox, Field, Modal, Notice, PageSkeleton, Pagination, SearchInput, Seg, Stat, Switch, Tabs, useConfirm } from '../components/ui';
 
-interface Stats { orders: number; pending: number; toFulfill: number; revenue: number; revenueMonth: number; currency: string; activeProducts: number; lowStock: number }
+interface Stats { orders: number; pending: number; toApprove: number; renewals: number; toFulfill: number; revenue: number; revenueMonth: number; currency: string; activeProducts: number; lowStock: number }
 interface PoolInfo { name: string; antiVpnEnabled: boolean }
 
 type Tab = 'products' | 'orders' | 'settings';
@@ -40,6 +40,7 @@ export default function AdminOrders() {
         <div className="stat-grid">
           <Stat label={t('revenue')} value={fmtMoney(s.revenue, s.currency, lang)} sub={t('revenueMonth', { v: fmtMoney(s.revenueMonth, s.currency, lang) })} tone="primary" />
           <Stat label={t('ordersCount')} value={s.orders} sub={s.pending > 0 ? t('pendingCount', { n: s.pending }) : t('noPending')} />
+          <Stat label={t('toApprove')} value={s.toApprove} sub={s.toApprove > 0 ? t('toApproveSub') : t('renewalsActive', { n: s.renewals })} tone={s.toApprove > 0 ? 'warn' : undefined} />
           <Stat label={t('toFulfill')} value={s.toFulfill} sub={t('toFulfillSub')} tone={s.toFulfill > 0 ? 'warn' : undefined} />
           <Stat label={t('activeProducts')} value={s.activeProducts} sub={s.lowStock > 0 ? t('lowStockCount', { n: s.lowStock }) : t('stockOk')} tone={s.lowStock > 0 ? 'warn' : undefined} />
         </div>
@@ -50,7 +51,7 @@ export default function AdminOrders() {
         onChange={setTab}
         tabs={[
           { id: 'products', label: t('products'), icon: 'package' },
-          { id: 'orders', label: t('allOrders'), icon: 'receipt', count: s?.toFulfill },
+          { id: 'orders', label: t('allOrders'), icon: 'receipt', count: (s?.toFulfill ?? 0) + (s?.toApprove ?? 0) || undefined },
           { id: 'settings', label: t('payments'), icon: 'card' },
         ]}
       />
@@ -81,7 +82,7 @@ function ProductsTab({ onChanged }: { onChanged: () => void }) {
   };
   const duplicate = async (p: Product) => {
     try {
-      await api.post('products', { name: `${p.name} ${t('copySuffix')}`, description: p.description ?? undefined, price: p.price, currency: p.currency, stock: p.stock, active: false, delivery: p.delivery });
+      await api.post('products', { name: `${p.name} ${t('copySuffix')}`, description: p.description ?? undefined, price: p.price, currency: p.currency, stock: p.stock, active: false, delivery: p.delivery, renewal_enabled: p.renewal_enabled });
       toast.success(t('duplicated'));
       refresh();
     } catch (e: any) { toast.error(e.message); }
@@ -128,7 +129,7 @@ function ProductsTab({ onChanged }: { onChanged: () => void }) {
                       <td>{p.stock === null ? <span className="text-muted">∞ {t('unlimited')}</span> : <Badge tone={p.stock <= 0 ? 'bad' : low ? 'warn' : 'muted'}>{p.stock <= 0 ? t('outOfStock') : t('units', { n: p.stock })}</Badge>}</td>
                       <td>
                         {p.delivery?.mode === 'panel_account'
-                          ? <Badge tone="good" icon="zap">{p.delivery.account?.custom_proxies ? t('deliveryPrivate') : p.delivery.account?.pool ? p.delivery.account.pool : t('deliveryPool')}</Badge>
+                          ? <div className="row gap-1"><Badge tone="good" icon="zap">{p.delivery.account?.custom_proxies ? t('deliveryPrivate') : p.delivery.account?.pool ? p.delivery.account.pool : t('deliveryPool')}</Badge>{p.delivery.approval === 'manual' && <Badge tone="warn" icon="eye">{t('manualApproval')}</Badge>}{p.renewal_enabled && <Badge tone="info" icon="refresh">{t('renewable')}</Badge>}</div>
                           : <span className="text-muted text-sm">{t('deliveryManual')}</span>}
                       </td>
                       <td><Switch checked={p.active} onChange={(v) => void toggleActive(p, v)} label={t('active')} /></td>
@@ -162,6 +163,7 @@ const GB = 1_000_000_000;
 interface Form {
   name: string; description: string; price: string; currency: string; unlimited: boolean; stock: string; active: boolean;
   mode: 'none' | 'panel_account';
+  approval: 'auto' | 'manual'; renewal: boolean; expiresUnit: 'day' | 'month' | 'year';
   threads: string; trafficGb: string; bandwidth: string; expiresDays: string; country: string; ttl: string; allowedIps: string; tags: string; pool: string; custom: string;
 }
 
@@ -171,6 +173,7 @@ function toForm(p: Product | null): Form {
     name: p?.name ?? '', description: p?.description ?? '', price: p ? String(p.price) : '', currency: p?.currency ?? 'EUR',
     unlimited: p ? p.stock === null : true, stock: p?.stock != null ? String(p.stock) : '10', active: p?.active ?? true,
     mode: p?.delivery?.mode ?? 'none',
+    approval: p?.delivery?.approval === 'manual' ? 'manual' : 'auto', renewal: !!p?.renewal_enabled, expiresUnit: a.expires_unit ?? 'day',
     threads: a.threads_limit != null ? String(a.threads_limit) : '',
     trafficGb: a.traffic_limit_bytes ? String(Math.round((a.traffic_limit_bytes / GB) * 100) / 100) : '',
     bandwidth: a.bandwidth_limit != null ? String(a.bandwidth_limit) : '',
@@ -200,6 +203,7 @@ function ProductModal({ product, pools, onClose, onSaved }: { product: Product |
   if (!/^[A-Za-z]{3}$/.test(f.currency)) errors.currency = t('err.currency');
   if (!f.unlimited && (!/^\d+$/.test(f.stock.trim()))) errors.stock = t('err.int');
   if (f.mode === 'panel_account') {
+    if (f.renewal && !(Number(f.expiresDays) > 0)) errors.expiresDays = t('err.renewalNeedsValidity');
     for (const k of ['threads', 'bandwidth', 'expiresDays', 'ttl'] as const) if (!isInt(f[k])) errors[k] = t('err.int');
     if (f.trafficGb.trim() !== '' && !(Number(f.trafficGb.replace(',', '.')) >= 0)) errors.trafficGb = t('err.number');
     if (f.country.trim() && !/^[A-Za-z]{2}(\s*,\s*[A-Za-z]{2})*$/.test(f.country.trim())) errors.country = t('err.country');
@@ -218,9 +222,11 @@ function ProductModal({ product, pools, onClose, onSaved }: { product: Product |
       currency: f.currency.toUpperCase(),
       stock: f.unlimited ? null : parseInt(f.stock, 10),
       active: f.active,
+      renewal_enabled: f.mode === 'panel_account' && f.renewal && Number(f.expiresDays) > 0,
       delivery: f.mode === 'panel_account'
         ? {
             mode: 'panel_account',
+            approval: f.approval,
             account: {
               threads_limit: intOrUndef(f.threads),
               traffic_limit_bytes: f.trafficGb.trim() !== '' && Number(f.trafficGb.replace(',', '.')) > 0 ? Math.round(Number(f.trafficGb.replace(',', '.')) * GB) : undefined,
@@ -228,6 +234,7 @@ function ProductModal({ product, pools, onClose, onSaved }: { product: Product |
               sticky_session_ttl: intOrUndef(f.ttl),
               bandwidth_limit: intOrUndef(f.bandwidth),
               expires_days: intOrUndef(f.expiresDays),
+              expires_unit: intOrUndef(f.expiresDays) ? f.expiresUnit : undefined,
               allowed_ips: f.allowedIps.trim() || undefined,
               tags: f.tags.trim() || undefined,
               custom_proxies: f.custom.trim() || undefined,
@@ -316,7 +323,14 @@ function ProductModal({ product, pools, onClose, onSaved }: { product: Product |
                 <Field label={t('dThreads')} error={show('threads')} hint={t('emptyUnlimited')}><input className="input" inputMode="numeric" value={f.threads} onChange={(e) => set('threads', e.target.value)} placeholder="∞" /></Field>
                 <Field label={t('dTraffic')} error={show('trafficGb')} hint={t('dTrafficHint')}><input className="input" inputMode="decimal" value={f.trafficGb} onChange={(e) => set('trafficGb', e.target.value)} placeholder="∞" /></Field>
                 <Field label={t('dBandwidth')} error={show('bandwidth')} hint={t('emptyUnlimited')}><input className="input" inputMode="numeric" value={f.bandwidth} onChange={(e) => set('bandwidth', e.target.value)} placeholder="∞" /></Field>
-                <Field label={t('dExpiresDays')} error={show('expiresDays')} hint={t('emptyNever')}><input className="input" inputMode="numeric" value={f.expiresDays} onChange={(e) => set('expiresDays', e.target.value)} placeholder="∞" /></Field>
+                <Field label={t('dValidity')} error={show('expiresDays')} hint={t('emptyNever')}>
+                  <div className="row gap-2" style={{ flexWrap: 'nowrap' }}>
+                    <input className="input" inputMode="numeric" value={f.expiresDays} onChange={(e) => set('expiresDays', e.target.value)} placeholder="∞" />
+                    <select className="input" style={{ width: 'auto' }} value={f.expiresUnit} onChange={(e) => set('expiresUnit', e.target.value as Form['expiresUnit'])} aria-label={t('dValidityUnit')}>
+                      <option value="day">{t('unit.day')}</option><option value="month">{t('unit.month')}</option><option value="year">{t('unit.year')}</option>
+                    </select>
+                  </div>
+                </Field>
                 <Field label={t('dCountry')} error={show('country')} hint={t('dCountryHint')}><input className="input" value={f.country} onChange={(e) => set('country', e.target.value)} placeholder="FR,DE" /></Field>
                 <Field label={t('dTtl')} error={show('ttl')} hint={t('dTtlHint')}><input className="input" inputMode="numeric" value={f.ttl} onChange={(e) => set('ttl', e.target.value)} placeholder="1800" /></Field>
               </div>
@@ -325,6 +339,22 @@ function ProductModal({ product, pools, onClose, onSaved }: { product: Product |
                 <Field label={t('dTags')}><input className="input" value={f.tags} onChange={(e) => set('tags', e.target.value)} placeholder="residential,fr" /></Field>
               </div>
               <Field label={t('dCustomProxies')} hint={t('dCustomProxiesHint')}><textarea className="input mono" rows={3} value={f.custom} onChange={(e) => set('custom', e.target.value)} placeholder="socks5://user:pass@1.2.3.4:1080" /></Field>
+
+              <div className="stack-sm">
+                <div className="label">{t('dApproval')}</div>
+                <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+                  <button type="button" className={`choice ${f.approval === 'auto' ? 'active' : ''}`} onClick={() => set('approval', 'auto')}>
+                    <Icon name="zap" size={18} /><span><b>{t('dApprovalAuto')}</b><div className="text-xs text-muted">{t('dApprovalAutoHint')}</div></span>
+                  </button>
+                  <button type="button" className={`choice ${f.approval === 'manual' ? 'active' : ''}`} onClick={() => set('approval', 'manual')}>
+                    <Icon name="eye" size={18} /><span><b>{t('dApprovalManual')}</b><div className="text-xs text-muted">{t('dApprovalManualHint')}</div></span>
+                  </button>
+                </div>
+              </div>
+              <label className="row gap-3" style={{ cursor: 'pointer' }}>
+                <Switch checked={f.renewal} onChange={(v) => set('renewal', v)} label={t('dRenewal')} />
+                <span><b>{t('dRenewal')}</b><div className="text-xs text-muted">{t('dRenewalHint')}</div></span>
+              </label>
             </div>
           )}
         </section>
@@ -379,7 +409,7 @@ function OrdersTab({ onChanged }: { onChanged: () => void }) {
           label={t('filter')}
           value={status}
           onChange={(v) => { setStatus(v); setOffset(0); }}
-          options={[{ id: 'all', label: t('filter.all') }, { id: 'pending', label: t('status.pending.short') }, { id: 'paid', label: t('status.paid') }, { id: 'fulfilled', label: t('status.fulfilled') }, { id: 'cancelled', label: t('status.cancelled') }]}
+          options={[{ id: 'all', label: t('filter.all') }, { id: 'pending', label: t('status.pending.short') }, { id: 'review', label: t('status.review') }, { id: 'paid', label: t('status.paid') }, { id: 'fulfilled', label: t('status.fulfilled') }, { id: 'cancelled', label: t('status.cancelled') }]}
         />
         <button className="btn btn-outline btn-sm" onClick={exportCsv} disabled={exporting || total === 0}><Icon name="download" size={14} />{t('exportCsv')}</button>
       </div>
@@ -423,9 +453,30 @@ function OrderDrawer({ order: initial, onClose, onChanged }: { order: Order; onC
   const [confirm, confirmEl] = useConfirm();
   const [refundNote, setRefundNote] = useState(false);
 
+  const approve = async () => {
+    if (!(await confirm({ title: t('approve'), message: t('confirmApprove'), confirmLabel: t('approve'), tone: 'primary' }))) return;
+    setBusy(true);
+    try {
+      const r = await api.post<{ order: Order }>(`orders/${order.id}/approve`);
+      setOrder(r.order);
+      toast.success(t('approved'));
+      onChanged();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const doc = async (kind: 'invoice' | 'receipt', payment?: string) => {
+    try {
+      const { blob, filename } = await api.blob(`orders/${order.id}/document?kind=${kind}&lang=${lang}${payment ? `&payment=${encodeURIComponent(payment)}` : ''}`);
+      downloadBlob(filename, blob);
+    } catch (e: any) { toast.error(e.message); }
+  };
+
   const change = async (status: OrderStatus) => {
     const cancel = status === 'cancelled';
-    const paid = order.status === 'paid' || order.status === 'fulfilled';
+    const paid = order.status === 'paid' || order.status === 'fulfilled' || order.status === 'review';
     const wallet = (order.payment_method ?? 'wallet') === 'wallet';
     const message = cancel
       ? paid
@@ -452,12 +503,17 @@ function OrderDrawer({ order: initial, onClose, onChanged }: { order: Order; onC
       <div className="stack">
         <div className="row-between"><StatusBadge status={order.status} /><PaymentBadge method={order.payment_method} /></div>
         <Timeline order={order} />
+        {order.status === 'review' && <Notice tone="warn" icon="eye">{t('reviewAdmin')}</Notice>}
+        {order.payment_alert && <Notice tone="error" icon="alert">{t(order.payment_alert.startsWith('rejected') ? 'alert.rejected' : `alert.${order.payment_alert}`, { r: order.payment_alert.replace('rejected:', '') })}</Notice>}
         {refundNote && <Notice tone="warn">{t('manualRefund')}</Notice>}
         <dl className="kv">
           <dt>{t('customer')}</dt><dd>{order.user_email || '—'}<div className="mono text-muted">{order.user_id}</div></dd>
           <dt>{t('date')}</dt><dd>{fmtDateTime(order.created_at, lang)}</dd>
           <dt>{t('updatedAt')}</dt><dd>{fmtDateTime(order.updated_at, lang)}</dd>
           <dt>{t('total')}</dt><dd><b>{fmtMoney(order.total, order.currency, lang)}</b></dd>
+          {order.paypal && <><dt>{t('pay.paypal')}</dt><dd><div className="mono">{order.paypal.note}</div>{order.paypal.payer_email && <div className="text-xs text-muted">{order.paypal.payer_name ? `${order.paypal.payer_name} · ` : ''}{order.paypal.payer_email}</div>}{order.paypal.txn_id && <div className="text-xs text-muted">{t('txn')} {order.paypal.txn_id}</div>}</dd></>}
+          {order.invoice_number && <><dt>{t('invoice')}</dt><dd className="mono">{order.invoice_number}</dd></>}
+          {order.approved_by && <><dt>{t('approvedBy')}</dt><dd>{order.approved_by}</dd></>}
         </dl>
         <div>
           <h4 className="section-title">{t('items')}</h4>
@@ -466,7 +522,27 @@ function OrderDrawer({ order: initial, onClose, onChanged }: { order: Order; onC
           </div>
         </div>
         {(order.deliveries?.length ?? 0) > 0 && <Credentials deliveries={order.deliveries!} filename={`proxies-${shortId(order.id).slice(1)}.txt`} />}
+        {(order.deliveries ?? []).some((d) => d.renewal) && (
+          <div className="section-box stack-sm">
+            <div className="text-sm text-bold row gap-2"><Icon name="refresh" size={14} />{t('renewTitle')}</div>
+            {(order.deliveries ?? []).filter((d) => d.renewal).map((d, i) => (
+              <div key={i} className="row-between text-xs"><span><span className="mono">{d.username}</span> · {d.expires_at ? t('expiresOn', { d: fmtDateTime(d.expires_at, lang) }) : '—'}</span><Badge tone={d.renew ? 'good' : 'muted'}>{d.renew ? t('renewOn') : t('renewOff')}{d.renewal!.count > 0 ? ` · ×${d.renewal!.count}` : ''}</Badge></div>
+            ))}
+          </div>
+        )}
+        {(order.payments?.length ?? 0) > 0 && (
+          <div className="section-box stack-sm">
+            <div className="text-sm text-bold row gap-2"><Icon name="receipt" size={14} />{t('paymentsHistory')}</div>
+            {order.payments!.map((pm) => (
+              <div key={pm.id} className="row-between text-xs" style={{ flexWrap: 'wrap' }}>
+                <span>{fmtDateTime(pm.at, lang)} · {pm.kind === 'renewal' ? t('renewal') : t('initialPayment')} · <b>{fmtMoney(pm.amount, pm.currency, lang)}</b>{pm.invoice_number ? ` · ${pm.invoice_number}` : ''}</span>
+                <span className="row gap-1"><button className="btn btn-ghost btn-sm" onClick={() => void doc('receipt', pm.id)}>{t('receipt')}</button><button className="btn btn-ghost btn-sm" onClick={() => void doc('invoice', pm.id)}>{t('invoice')}</button></span>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="row">
+          {order.status === 'review' && <button className="btn btn-success" onClick={() => void approve()} disabled={busy}><Icon name="check" size={14} />{t('approve')}</button>}
           {order.status === 'paid' && <button className="btn btn-success" onClick={() => void change('fulfilled')} disabled={busy}><Icon name="check" size={14} />{t('markFulfilled')}</button>}
           {order.status !== 'cancelled' && <button className="btn btn-danger" onClick={() => void change('cancelled')} disabled={busy}><Icon name="ban" size={14} />{order.status === 'pending' ? t('cancelOrder') : t('cancelRefund')}</button>}
         </div>
@@ -481,7 +557,7 @@ function OrderDrawer({ order: initial, onClose, onChanged }: { order: Order; onC
 function PaymentsTab() {
   const t = useT();
   const wallet = useFetch<{ available: boolean; configured: boolean }>('wallet-status');
-  const methods = useFetch<{ stripe: { enabled: boolean }; nowpayments: { enabled: boolean } }>('payments/methods');
+  const methods = useFetch<{ stripe: { enabled: boolean }; nowpayments: { enabled: boolean }; paypal?: { enabled: boolean } }>('payments/methods');
   const row = (ok: boolean | undefined, name: string, okText: string, koText: string, icon: 'wallet' | 'card' | 'coins') => (
     <div className="row-between" style={{ padding: '0.7rem 0', borderBottom: '1px solid var(--border)' }}>
       <div className="row gap-3"><span className="avatar"><Icon name={icon} size={16} /></span><div><b>{name}</b><div className="text-xs text-muted">{ok ? okText : koText}</div></div></div>
@@ -495,6 +571,7 @@ function PaymentsTab() {
         {row(wallet.data ? wallet.data.available && wallet.data.configured : undefined, t('pay.wallet'), t('walletOk'), t('walletNotConfigured'), 'wallet')}
         {row(methods.data?.stripe.enabled, t('pay.stripe'), t('stripeOk'), t('stripeOff'), 'card')}
         {row(methods.data?.nowpayments.enabled, t('pay.nowpayments'), t('cryptoOk'), t('cryptoOff'), 'coins')}
+        {row(methods.data ? !!methods.data.paypal?.enabled : undefined, t('pay.paypal'), t('paypalOk'), t('paypalOff'), 'card')}
       </Card>
     </div>
   );

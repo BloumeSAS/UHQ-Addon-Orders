@@ -18,6 +18,8 @@ export class DeliveryAccountDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) bandwidth_limit?: number;
   /** Durée de validité en jours à partir de l'achat (0/omis = sans expiration). */
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(3650) expires_days?: number;
+  /** Unité de `expires_days` : jours (défaut), mois ou années. */
+  @IsOptional() @IsIn(['day', 'month', 'year']) expires_unit?: 'day' | 'month' | 'year';
   @IsOptional() @IsString() @MaxLength(2000) allowed_ips?: string;
   @IsOptional() @IsString() @MaxLength(200) tags?: string;
   /**
@@ -37,6 +39,11 @@ export class DeliveryAccountDto {
 export class DeliveryConfigDto {
   @IsIn(['none', 'panel_account'])
   mode!: 'none' | 'panel_account';
+
+  /** 'manual' = la commande payée attend la validation d'un admin avant la création du compte. */
+  @IsOptional()
+  @IsIn(['auto', 'manual'])
+  approval?: 'auto' | 'manual';
 
   @IsOptional()
   @ValidateNested()
@@ -81,6 +88,11 @@ export class CreateProductDto {
   @ValidateNested()
   @Type(() => DeliveryConfigDto)
   delivery?: DeliveryConfigDto;
+
+  /** Les comptes livrés peuvent être renouvelés automatiquement (solde Wallet). */
+  @IsOptional()
+  @IsBoolean()
+  renewal_enabled?: boolean;
 }
 
 export class UpdateProductDto {
@@ -92,6 +104,7 @@ export class UpdateProductDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(10_000_000) stock?: number | null;
   @IsOptional() @IsBoolean() active?: boolean;
   @IsOptional() @ValidateNested() @Type(() => DeliveryConfigDto) delivery?: DeliveryConfigDto;
+  @IsOptional() @IsBoolean() renewal_enabled?: boolean;
 }
 
 export class OrderItemDto {
@@ -114,8 +127,11 @@ export class PlaceOrderDto {
 
   /** Défaut 'wallet' (comportement historique — débit synchrone du solde). */
   @IsOptional()
-  @IsIn(['wallet', 'stripe', 'nowpayments'])
-  paymentMethod?: 'wallet' | 'stripe' | 'nowpayments';
+  @IsIn(['wallet', 'stripe', 'nowpayments', 'paypal'])
+  paymentMethod?: 'wallet' | 'stripe' | 'nowpayments' | 'paypal';
+
+  /** Le client active le renouvellement automatique (solde Wallet) des produits qui le proposent. */
+  @IsOptional() @IsBoolean() renew?: boolean;
 
   /** Requis pour stripe/nowpayments — URL de retour après paiement. */
   @IsOptional() @IsString() @MaxLength(2000) successUrl?: string;
@@ -123,8 +139,8 @@ export class PlaceOrderDto {
 }
 
 export class OrderStatusDto {
-  @IsIn(['pending', 'paid', 'fulfilled', 'cancelled'])
-  status!: 'pending' | 'paid' | 'fulfilled' | 'cancelled';
+  @IsIn(['pending', 'review', 'paid', 'fulfilled', 'cancelled'])
+  status!: 'pending' | 'review' | 'paid' | 'fulfilled' | 'cancelled';
 }
 
 export class UpdatePaymentSettingsDto {
@@ -135,4 +151,19 @@ export class UpdatePaymentSettingsDto {
   @IsOptional() @IsBoolean() nowpaymentsEnabled?: boolean;
   @IsOptional() @IsString() @MaxLength(500) nowpaymentsApiKey?: string;
   @IsOptional() @IsString() @MaxLength(500) nowpaymentsIpnSecret?: string;
+  @IsOptional() @IsBoolean() paypalEnabled?: boolean;
+  @IsOptional() @IsString() @MaxLength(254) paypalEmail?: string;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(168) paypalTimeoutHours?: number;
+}
+
+export class RenewDto {
+  @IsInt() @Min(0) @Max(100_000) index!: number;
+  @IsBoolean() enabled!: boolean;
+}
+
+export class BillingProfileDto {
+  @IsOptional() @IsString() @MaxLength(120) name?: string;
+  @IsOptional() @IsString() @MaxLength(120) company?: string;
+  @IsOptional() @IsString() @MaxLength(400) address?: string;
+  @IsOptional() @IsString() @MaxLength(40) vat_number?: string;
 }

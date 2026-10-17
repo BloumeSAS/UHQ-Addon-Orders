@@ -1,12 +1,14 @@
 import {
-  Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, Headers, HttpCode,
+  Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, Headers, HttpCode, NotFoundException,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { OrdersService } from './orders.service';
 import { PaymentsService } from './payments/payments.service';
 import { PanelAuthService } from './panel-auth.service';
+import { InvoiceService } from './invoice/invoice.service';
+import { StoreService } from './store.service';
 import {
-  CreateProductDto, UpdateProductDto, PlaceOrderDto, OrderStatusDto, UpdatePaymentSettingsDto,
+  CreateProductDto, UpdateProductDto, PlaceOrderDto, OrderStatusDto, UpdatePaymentSettingsDto, RenewDto, BillingProfileDto,
 } from './dto/orders.dto';
 
 @Controller('api')
@@ -15,6 +17,8 @@ export class OrdersController {
     private readonly orders: OrdersService,
     private readonly payments: PaymentsService,
     private readonly auth: PanelAuthService,
+    private readonly invoices: InvoiceService,
+    private readonly store: StoreService,
   ) {}
 
   // ─── Wallet status ───────────────────────────────────────────────────────────
@@ -122,7 +126,7 @@ export class OrdersController {
   async placeOrder(@Req() req: Request, @Body() dto: PlaceOrderDto) {
     const user = await this.auth.authenticate(req);
     const { order, checkoutUrl } = await this.orders.checkout(
-      { id: user.id, email: user.email }, dto.items, dto.paymentMethod ?? 'wallet', dto.successUrl, dto.cancelUrl,
+      { id: user.id, email: user.email }, dto.items, dto.paymentMethod ?? 'wallet', dto.successUrl, dto.cancelUrl, dto.renew === true,
     );
     return { success: true, order, checkoutUrl };
   }
@@ -130,9 +134,110 @@ export class OrdersController {
   /** PATCH /api/orders/:id/status — changer le statut (ADMIN) ; annulation = remboursement */
   @Patch('orders/:id/status')
   async updateStatus(@Req() req: Request, @Param('id') id: string, @Body() dto: OrderStatusDto) {
-    await this.auth.requireAdmin(req);
-    const { order, manualRefundRequired } = await this.orders.updateStatus(id, dto.status);
+    const admin = await this.auth.requireAdmin(req);
+    const { order, manualRefundRequired } = await this.orders.updateStatus(id, dto.status, admin.email || admin.id);
     return { success: true, order, manualRefundRequired };
+  }
+
+  /** POST /api/orders/:id/approve — valide une commande « à valider » : les comptes sont créés puis livrés (ADMIN). */
+  @Post('orders/:id/approve')
+  @HttpCode(200)
+  async approve(@Req() req: Request, @Param('id') id: string) {
+    const admin = await this.auth.requireAdmin(req);
+    return { success: true, order: await this.orders.approve(id, admin.email || admin.id) };
+  }
+
+  /** GET /api/pending-approvals — commandes payées de l'utilisateur en attente de validation (sans aucun accès). */
+  @Get('pending-approvals')
+  async pendingApprovals(@Req() req: Request) {
+    const user = await this.auth.authenticate(req);
+    return { pending: this.orders.pendingApprovals(user.id) };
+  }
+
+  /** POST /api/orders/:id/renew — active / coupe le renouvellement automatique d'un compte livré (propriétaire). */
+  @Post('orders/:id/renew')
+  @HttpCode(200)
+  async renew(@Req() req: Request, @Param('id') id: string, @Body() dto: RenewDto) {
+    const user = await this.auth.authenticate(req);
+    return { success: true, order: this.orders.setRenew(user.id, id, dto.index, dto.enabled) };
+  }
+
+  // ─── Factures / reçus ──────────────────────────────────────────────────────
+
+  /** GET /api/invoice/status — la facturation est-elle activée ? (tout utilisateur connecté) */
+  @Get('invoice/status')
+  async invoiceStatus(@Req() req: Request) {
+    await this.auth.authenticate(req);
+    return { enabled: this.store.invoiceSettings.enabled };
+  }
+
+  /** GET /api/invoice/settings — réglages de facturation (ADMIN). */
+  @Get('invoice/settings')
+  async getInvoiceSettings(@Req() req: Request) {
+    await this.auth.requireAdmin(req);
+    return this.invoices.getSettings();
+  }
+
+  /** POST /api/invoice/settings — enregistre les réglages de facturation (ADMIN). */
+  @Post('invoice/settings')
+  @HttpCode(200)
+  async setInvoiceSettings(@Req() req: Request, @Body() body: Record<string, any>) {
+    await this.auth.requireAdmin(req);
+    return this.invoices.updateSettings(body ?? {});
+  }
+
+  /** GET /api/invoice/preview?kind=invoice|receipt&lang=fr|en — PDF d'exemple avec les réglages enregistrés (ADMIN). */
+  @Get('invoice/preview')
+  async invoicePreview(@Req() req: Request, @Res() res: Response, @Query('kind') kind?: string, @Query('lang') lang?: string) {
+    await this.auth.requireAdmin(req);
+    const buf = await this.invoices.preview(kind === 'receipt' ? 'receipt' : 'invoice', lang === 'en' ? 'en' : 'fr');
+    this.sendPdf(res, buf, 'preview.pdf');
+  }
+
+  /** GET /api/billing-profile — coordonnées de facturation du client. */
+  @Get('billing-profile')
+  async getBilling(@Req() req: Request) {
+    const user = await this.auth.authenticate(req);
+    return { profile: this.store.billingProfile(user.id) ?? { name: '', company: '', address: '', vat_number: '' } };
+  }
+
+  /** POST /api/billing-profile — enregistre les coordonnées de facturation du client. */
+  @Post('billing-profile')
+  @HttpCode(200)
+  async setBilling(@Req() req: Request, @Body() dto: BillingProfileDto) {
+    const user = await this.auth.authenticate(req);
+    const profile = {
+      name: (dto.name ?? '').trim(), company: (dto.company ?? '').trim(),
+      address: (dto.address ?? '').trim(), vat_number: (dto.vat_number ?? '').trim(),
+    };
+    this.store.setBillingProfile(user.id, profile);
+    return { profile };
+  }
+
+  /**
+   * GET /api/orders/:id/document?kind=invoice|receipt&payment=<id>&lang=fr|en — PDF d'un encaissement (propriétaire ou admin).
+   * Une commande non payée n'a ni reçu ni facture.
+   */
+  @Get('orders/:id/document')
+  async document(
+    @Req() req: Request, @Res() res: Response, @Param('id') id: string,
+    @Query('kind') kind?: string, @Query('payment') paymentId?: string, @Query('lang') lang?: string,
+  ) {
+    const user = await this.auth.authenticate(req);
+    const order = this.orders.orderFor(user, id);
+    const payment = this.invoices.paymentFor(order, paymentId);
+    if (!payment) throw new NotFoundException('Aucun paiement pour cette commande');
+    const docKind = kind === 'receipt' ? 'receipt' : 'invoice';
+    if (docKind === 'invoice') this.orders.ensureInvoiceNumber(order, payment);
+    const buf = await this.invoices.render(order, payment, docKind, lang === 'en' ? 'en' : 'fr', this.store.billingProfile(order.user_id));
+    this.sendPdf(res, buf, `${docKind === 'invoice' ? (payment.invoice_number ?? 'facture') : 'recu-' + order.id.slice(0, 8)}.pdf`);
+  }
+
+  private sendPdf(res: Response, buf: Buffer, name: string): void {
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/[^\w.\-]/g, '_')}"`);
+    res.setHeader('Content-Length', String(buf.length));
+    res.end(buf);
   }
 
   // ─── Paiement : méthodes disponibles + réglages (ADMIN) ─────────────────────
@@ -194,6 +299,22 @@ export class OrdersController {
       res.json({ received: true });
     } catch (err: any) {
       res.status(400).json({ error: err?.message ?? 'Webhook invalide' });
+    }
+  }
+
+  /**
+   * POST /api/payments/paypal/ipn — IPN PayPal (public, corps BRUT). Rien n'est cru avant que PayPal ait répondu VERIFIED
+   * au renvoi du corps ; ensuite OrdersService.handlePaypalIpn contrôle destinataire, devise, montant, F&F et doublon.
+   */
+  @Post('payments/paypal/ipn')
+  @HttpCode(200)
+  async paypalIpn(@Req() req: Request, @Res() res: Response) {
+    try {
+      const fields = await this.payments.verifyPaypalIpn(Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0));
+      const result = await this.orders.handlePaypalIpn(fields);
+      res.json({ received: true, result });
+    } catch (err: any) {
+      res.status(typeof err?.getStatus === 'function' ? err.getStatus() : 500).json({ error: err?.message ?? 'IPN invalide' });
     }
   }
 

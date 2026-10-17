@@ -35,7 +35,21 @@ export function createApi(token: string, lang: 'fr' | 'en' = 'fr') {
     return data as T;
   }
 
+  /** Téléchargement authentifié (PDF) : le jeton ne passe jamais dans l'URL. */
+  async function blob(path: string): Promise<{ blob: Blob; filename: string }> {
+    const res = await fetch(`${base}api/${path}`, { headers: { Authorization: `Bearer ${token}`, 'x-lang': lang } });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const message = (data as any)?.message ?? (data as any)?.error ?? `HTTP ${res.status}`;
+      throw new ApiError(Array.isArray(message) ? message.join(', ') : String(message), res.status);
+    }
+    const cd = res.headers.get('Content-Disposition') ?? '';
+    const m = /filename="([^"]+)"/.exec(cd);
+    return { blob: await res.blob(), filename: m?.[1] ?? 'document.pdf' };
+  }
+
   return {
+    blob,
     get: <T>(path: string, signal?: AbortSignal) => request<T>('GET', path, undefined, signal),
     post: <T>(path: string, body?: unknown) => request<T>('POST', path, body ?? {}),
     patch: <T>(path: string, body: unknown) => request<T>('PATCH', path, body),

@@ -81,6 +81,29 @@ export function downloadFile(filename: string, content: string, mime = 'text/pla
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/** Octets → « 12,5 Go » (unité décimale, comme le panel). */
+export function fmtBytes(bytes: number | null | undefined, lang: Lang = 'fr'): string {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n <= 0) return '0';
+  const units = lang === 'fr' ? ['o', 'Ko', 'Mo', 'Go', 'To'] : ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let v = n;
+  while (v >= 1000 && i < units.length - 1) { v /= 1000; i += 1; }
+  return `${new Intl.NumberFormat(locale(lang), { maximumFractionDigits: v >= 100 ? 0 : 2 }).format(v)} ${units[i]}`;
+}
+
+/** Télécharge un Blob (PDF…) généré à partir d'une réponse authentifiée. */
+export function downloadBlob(filename: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 /** CSV (séparateur « ; » pour Excel FR) ; protège contre l'injection de formules (=, +, -, @). */
 export function toCsv(rows: (string | number | null | undefined)[][]): string {
   const cell = (v: string | number | null | undefined) => {

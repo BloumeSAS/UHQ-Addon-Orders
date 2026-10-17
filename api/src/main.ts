@@ -31,6 +31,8 @@ async function bootstrap() {
   // AVANT le parseur JSON global ci-dessous (ordre des `app.use()`).
   app.use('/api/payments/stripe/webhook', raw({ type: 'application/json' }));
   app.use('/api/payments/nowpayments/webhook', raw({ type: 'application/json' }));
+  // IPN PayPal : formulaire url-encodé, renvoyé tel quel à PayPal pour vérification (octets exacts requis).
+  app.use('/api/payments/paypal/ipn', raw({ type: '*/*', limit: '64kb' }));
   (app.getHttpAdapter().getInstance() as any).disable('x-powered-by');
   app.use((_req: any, res: any, next: any) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');

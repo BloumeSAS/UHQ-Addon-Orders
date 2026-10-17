@@ -2,6 +2,8 @@ import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 
+export type ExpiresUnit = 'day' | 'month' | 'year';
+
 /** Specs du compte proxy créé sur le panel à la livraison (toutes optionnelles). */
 export interface DeliveryAccount {
   threads_limit?: number;
@@ -9,7 +11,9 @@ export interface DeliveryAccount {
   country_filter?: string;
   sticky_session_ttl?: number;
   bandwidth_limit?: number;
+  /** Durée de validité : valeur (0 / absent = jamais) exprimée dans `expires_unit` (défaut : jours). */
   expires_days?: number;
+  expires_unit?: ExpiresUnit;
   allowed_ips?: string;
   tags?: string;
   /** Liste privée d'upstreams ; vide = pool partagé. */
@@ -22,6 +26,8 @@ export interface DeliveryAccount {
 export interface DeliveryConfig {
   mode: 'none' | 'panel_account';
   account?: DeliveryAccount;
+  /** 'manual' = la commande payée attend la validation d'un admin avant la création du compte. Défaut : 'auto'. */
+  approval?: 'auto' | 'manual';
 }
 
 export interface ProductRecord {
@@ -35,6 +41,8 @@ export interface ProductRecord {
   active: boolean;
   /** Livraison automatique (défaut : { mode: 'none' }). */
   delivery: DeliveryConfig;
+  /** Les comptes livrés peuvent être renouvelés automatiquement (solde Wallet) quand le client l'active. */
+  renewal_enabled?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -44,6 +52,8 @@ export interface OrderItem {
   name: string;
   unit_price: number;
   quantity: number;
+  /** Livraison + option de renouvellement FIGÉES à la commande (la livraison validée plus tard / les renouvellements les utilisent). */
+  snapshot?: { delivery: DeliveryConfig; renewal_enabled: boolean };
 }
 
 /** Compte proxy livré à l'acheteur après paiement. */
@@ -60,6 +70,23 @@ export interface DeliveredAccount {
   panel_user_id?: string;
   /** true = le compte est rattaché à l'acheteur (visible dans « Mes proxies »). Absent des livraisons d'avant la v1.3.1. */
   owner_linked?: boolean;
+  /** Date d'expiration du compte (absent = sans expiration). */
+  expires_at?: string;
+  /** Renouvellement automatique activé par le client (solde Wallet). */
+  renew?: boolean;
+  /** Configuration ET prix figés AU MOMENT DE L'ACHAT : un renouvellement n'utilise jamais la config actuelle du produit. */
+  renewal?: RenewalState;
+}
+
+export interface RenewalState {
+  unit_price: number;
+  currency: string;
+  product_name: string;
+  account: DeliveryAccount;
+  count: number;
+  last_at?: string;
+  failed_at?: string;
+  last_error?: string;
 }
 
 /**
@@ -67,14 +94,46 @@ export interface DeliveredAccount {
  * en attente de confirmation webhook — pas encore débitée, pas livrée.
  * N'existe jamais pour un paiement Wallet (débit synchrone à la commande).
  */
-export type OrderStatus = 'pending' | 'paid' | 'fulfilled' | 'cancelled';
-export type PaymentMethod = 'wallet' | 'stripe' | 'nowpayments';
+export type OrderStatus = 'pending' | 'review' | 'paid' | 'fulfilled' | 'cancelled';
+export type PaymentMethod = 'wallet' | 'stripe' | 'nowpayments' | 'paypal';
+
+/** Un encaissement rattaché à une commande (paiement initial ou renouvellement) — une facture / un reçu par encaissement. */
+export interface PaymentEvent {
+  id: string;
+  kind: 'initial' | 'renewal';
+  amount: number;
+  currency: string;
+  at: string;
+  method: PaymentMethod;
+  description: string;
+  invoice_number?: string;
+}
+
+/** Paiement PayPal Amis & Famille : consignes affichées au client puis rapprochement par l'IPN. */
+export interface PaypalInfo {
+  email: string;
+  note: string;
+  txn_id?: string;
+  payer_email?: string;
+  payer_name?: string;
+}
 
 export interface OrderRecord {
   id: string;
   user_id: string;
   /** E-mail du client au moment de la commande (affichage admin). */
   user_email?: string;
+  /** Encaissements (paiement initial + renouvellements). Absent des commandes d'avant la v1.4.0 : le paiement initial est alors implicite. */
+  payments?: PaymentEvent[];
+  /** Numéro de facture du paiement initial (si la facturation était activée). */
+  invoice_number?: string;
+  /** Le client a demandé le renouvellement automatique à la commande. */
+  renew?: boolean;
+  paypal?: PaypalInfo;
+  /** Alerte : PayPal a signalé un remboursement / une contestation de ce paiement (à vérifier par l'admin). */
+  payment_alert?: string;
+  approved_by?: string;
+  approved_at?: string;
   /** true = le stock est déjà réservé pour cette commande (absent des commandes d'avant la v1.3.0). */
   stock_reserved?: boolean;
   items: OrderItem[];
@@ -105,6 +164,11 @@ export interface PaymentSettings {
   nowpaymentsEnabled: boolean;
   nowpaymentsApiKey: string;
   nowpaymentsIpnSecret: string;
+  /** PayPal « Amis & Famille » : le client envoie le montant exact à cet e-mail avec la note indiquée ; l'IPN valide. */
+  paypalEnabled: boolean;
+  paypalEmail: string;
+  /** Une commande PayPal non payée est annulée (stock rendu) après ce délai, en heures. */
+  paypalTimeoutHours: number;
 }
 
 export const EMPTY_PAYMENT_SETTINGS: PaymentSettings = {
@@ -115,12 +179,78 @@ export const EMPTY_PAYMENT_SETTINGS: PaymentSettings = {
   nowpaymentsEnabled: false,
   nowpaymentsApiKey: '',
   nowpaymentsIpnSecret: '',
+  paypalEnabled: false,
+  paypalEmail: '',
+  paypalTimeoutHours: 24,
 };
+
+/** Facturation PDF (reçus et factures) — réglée par l'admin dans Paramètres → Extensions du panel. */
+export interface InvoiceSettings {
+  enabled: boolean;
+  company_name: string;
+  legal_form: string;
+  address: string;
+  registration_id: string;
+  vat_number: string;
+  email: string;
+  phone: string;
+  website: string;
+  /** Logo en data URL (PNG/JPEG, ≤ 300 Ko) — jamais téléchargé depuis une URL externe. */
+  logo_data_url: string;
+  accent_color: string;
+  invoice_title: string;
+  number_prefix: string;
+  number_include_year: boolean;
+  number_padding: number;
+  next_number: number;
+  /** Taux de TVA (%) ; 0 = pas de TVA (la mention d'exonération est alors imprimée). */
+  vat_rate: number;
+  prices_include_vat: boolean;
+  vat_exemption_note: string;
+  payment_terms: string;
+  footer_text: string;
+}
+
+export const EMPTY_INVOICE_SETTINGS: InvoiceSettings = {
+  enabled: false,
+  company_name: '',
+  legal_form: '',
+  address: '',
+  registration_id: '',
+  vat_number: '',
+  email: '',
+  phone: '',
+  website: '',
+  logo_data_url: '',
+  accent_color: '#e5532d',
+  invoice_title: '',
+  number_prefix: 'FAC-',
+  number_include_year: true,
+  number_padding: 5,
+  next_number: 1,
+  vat_rate: 0,
+  prices_include_vat: true,
+  vat_exemption_note: 'TVA non applicable, art. 293 B du CGI',
+  payment_terms: 'Payé',
+  footer_text: '',
+};
+
+/** Coordonnées de facturation d'un client (facultatives) — saisies par lui, utilisées sur ses factures. */
+export interface BillingProfile {
+  name: string;
+  company: string;
+  address: string;
+  vat_number: string;
+}
 
 interface StoreData {
   products: Record<string, ProductRecord>;
   orders: OrderRecord[];
   paymentSettings: PaymentSettings;
+  invoiceSettings: InvoiceSettings;
+  billingProfiles: Record<string, BillingProfile>;
+  /** Identifiants de transactions PayPal déjà traités (un IPN peut être renvoyé plusieurs fois). */
+  paypalTxns: string[];
 }
 
 /**
@@ -131,7 +261,10 @@ interface StoreData {
 export class StoreService implements OnModuleInit {
   private readonly logger = new Logger(StoreService.name);
   private readonly dbPath: string;
-  private data: StoreData = { products: {}, orders: [], paymentSettings: { ...EMPTY_PAYMENT_SETTINGS } };
+  private data: StoreData = {
+    products: {}, orders: [], paymentSettings: { ...EMPTY_PAYMENT_SETTINGS },
+    invoiceSettings: { ...EMPTY_INVOICE_SETTINGS }, billingProfiles: {}, paypalTxns: [],
+  };
   private readOnly = false;
 
   constructor() {
@@ -149,6 +282,9 @@ export class StoreService implements OnModuleInit {
           products: parsed.products ?? {},
           orders: parsed.orders ?? [],
           paymentSettings: { ...EMPTY_PAYMENT_SETTINGS, ...(parsed.paymentSettings ?? {}) },
+          invoiceSettings: { ...EMPTY_INVOICE_SETTINGS, ...(parsed.invoiceSettings ?? {}) },
+          billingProfiles: parsed.billingProfiles && typeof parsed.billingProfiles === 'object' ? parsed.billingProfiles : {},
+          paypalTxns: Array.isArray(parsed.paypalTxns) ? parsed.paypalTxns : [],
         };
         this.logger.log(`Données chargées depuis ${this.dbPath}`);
       } else {
@@ -181,6 +317,57 @@ export class StoreService implements OnModuleInit {
 
   get paymentSettings(): PaymentSettings {
     return this.data.paymentSettings;
+  }
+
+  get invoiceSettings(): InvoiceSettings {
+    return this.data.invoiceSettings;
+  }
+
+  billingProfile(userId: string): BillingProfile | undefined {
+    return this.data.billingProfiles[userId];
+  }
+
+  allBillingProfiles(): Record<string, BillingProfile> {
+    return this.data.billingProfiles;
+  }
+
+  paypalTxnList(): string[] {
+    return this.data.paypalTxns;
+  }
+
+  setBillingProfile(userId: string, profile: BillingProfile): void {
+    this.data.billingProfiles[userId] = profile;
+    this.persist();
+  }
+
+  setInvoiceSettings(settings: InvoiceSettings): void {
+    this.data.invoiceSettings = settings;
+    this.persist();
+  }
+
+  /** Numéro de facture suivant (compteur persistant, jamais réutilisé). */
+  nextInvoiceNumber(): string {
+    const st = this.data.invoiceSettings;
+    const n = Math.max(1, Math.floor(st.next_number || 1));
+    st.next_number = n + 1;
+    this.persist();
+    const year = st.number_include_year ? `${new Date().getUTCFullYear()}-` : '';
+    return `${st.number_prefix || ''}${year}${String(n).padStart(Math.max(1, Math.min(10, st.number_padding || 5)), '0')}`;
+  }
+
+  /** true si la transaction PayPal est nouvelle (et la mémorise) ; false si déjà traitée. */
+  claimPaypalTxn(txnId: string): boolean {
+    if (this.data.paypalTxns.includes(txnId)) return false;
+    this.data.paypalTxns.push(txnId);
+    if (this.data.paypalTxns.length > 20_000) this.data.paypalTxns = this.data.paypalTxns.slice(-20_000);
+    this.persist();
+    return true;
+  }
+
+  /** Libère une transaction PayPal mémorisée (livraison échouée : l'IPN renvoyé doit pouvoir être retraité). */
+  unclaimPaypalTxn(txnId: string): void {
+    this.data.paypalTxns = this.data.paypalTxns.filter((t) => t !== txnId);
+    this.persist();
   }
 
   // ─── Mutations ────────────────────────────────────────────────────────────────
@@ -220,10 +407,16 @@ export class StoreService implements OnModuleInit {
     products: Record<string, ProductRecord>;
     orders: OrderRecord[];
     paymentSettings?: PaymentSettings;
+    invoiceSettings?: InvoiceSettings;
+    billingProfiles?: Record<string, BillingProfile>;
+    paypalTxns?: string[];
   }): void {
     this.data.products = snapshot.products;
     this.data.orders = snapshot.orders;
     if (snapshot.paymentSettings) this.data.paymentSettings = { ...EMPTY_PAYMENT_SETTINGS, ...snapshot.paymentSettings };
+    if (snapshot.invoiceSettings) this.data.invoiceSettings = { ...EMPTY_INVOICE_SETTINGS, ...snapshot.invoiceSettings };
+    if (snapshot.billingProfiles) this.data.billingProfiles = snapshot.billingProfiles;
+    if (snapshot.paypalTxns) this.data.paypalTxns = snapshot.paypalTxns;
     this.persist();
   }
 

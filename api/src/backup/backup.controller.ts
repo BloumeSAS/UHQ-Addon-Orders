@@ -38,6 +38,10 @@ export class BackupController {
     const data = {
       products:   Object.values(this.store.products),
       orders:     this.store.orders,
+      // Les clés des passerelles de paiement ne sont volontairement PAS exportées : à ressaisir après une restauration.
+      invoiceSettings: this.store.invoiceSettings,
+      billingProfiles: this.store.allBillingProfiles(),
+      paypalTxns: this.store.paypalTxnList(),
       exportedAt: new Date().toISOString(),
     };
     this.logger.log(`Backup export: ${data.products.length} produits, ${data.orders.length} commandes`);
@@ -48,7 +52,7 @@ export class BackupController {
   @Post('import')
   import(
     @Headers('x-panel-key') key: string,
-    @Body() body: { products?: any[]; orders?: any[] },
+    @Body() body: { products?: any[]; orders?: any[]; invoiceSettings?: any; billingProfiles?: any; paypalTxns?: any },
   ) {
     this.checkAuth(key);
 
@@ -58,6 +62,9 @@ export class BackupController {
     this.store.restoreData({
       products,
       orders: Array.isArray(body?.orders) ? body.orders : [],
+      invoiceSettings: body?.invoiceSettings && typeof body.invoiceSettings === 'object' ? body.invoiceSettings : undefined,
+      billingProfiles: body?.billingProfiles && typeof body.billingProfiles === 'object' ? body.billingProfiles : undefined,
+      paypalTxns: Array.isArray(body?.paypalTxns) ? body.paypalTxns.filter((x: unknown) => typeof x === 'string') : undefined,
     });
 
     this.logger.log(

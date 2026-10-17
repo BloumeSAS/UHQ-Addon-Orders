@@ -266,3 +266,11 @@ textarea.input { resize: vertical; min-height: 4.5rem; }
   .tx-row { padding: 0.65rem 0.8rem; }
   .hbar { grid-template-columns: minmax(4rem, 30%) 1fr auto; }
 }
+
+/* Caractéristiques d'un produit */
+.spec-list { list-style: none; display: grid; grid-template-columns: 1fr; gap: 0.35rem; margin: 0; padding: 0.55rem 0.1rem 0.1rem; border-top: 1px dashed var(--border); font-size: 0.76rem; }
+.spec-list li { display: flex; align-items: center; gap: 0.35rem; min-width: 0; }
+.spec-list li b { margin-left: auto; white-space: nowrap; }
+.spec-list li span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.steps { padding-left: 1.2rem; display: grid; gap: 0.25rem; font-size: 0.85rem; color: var(--fg2); }
+.text-red { color: var(--red, #dc2626); }

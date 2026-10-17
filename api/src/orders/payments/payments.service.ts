@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { randomBytes } from 'crypto';
 import Stripe from 'stripe';
 import { StoreService, PaymentSettings, OrderRecord } from '../store.service';
 
@@ -35,6 +36,7 @@ export class PaymentsService {
     wallet: boolean;
     stripe: { enabled: boolean; publishableKey: string };
     nowpayments: { enabled: boolean };
+    paypal: { enabled: boolean };
   }> {
     const s = this.store.paymentSettings;
     return {
@@ -44,6 +46,7 @@ export class PaymentsService {
         publishableKey: s.stripeEnabled ? s.stripePublishableKey : '',
       },
       nowpayments: { enabled: s.nowpaymentsEnabled && !!s.nowpaymentsApiKey },
+      paypal: { enabled: s.paypalEnabled && this.isEmail(s.paypalEmail) },
     };
   }
 
@@ -81,9 +84,67 @@ export class PaymentsService {
       }
       (next as any)[key] = value;
     }
+    next.paypalEmail = String(next.paypalEmail ?? '').trim();
+    if (next.paypalEmail && !this.isEmail(next.paypalEmail)) throw new BadRequestException('E-mail PayPal invalide');
+    if (next.paypalEnabled && !next.paypalEmail) throw new BadRequestException('Renseignez l\'e-mail PayPal avant d\'activer ce moyen de paiement');
+    const hours = Number(next.paypalTimeoutHours);
+    next.paypalTimeoutHours = Number.isFinite(hours) ? Math.max(1, Math.min(168, Math.round(hours))) : 24;
     this.store.setPaymentSettings(next);
     return this.getSettingsMasked();
   }
+
+  private isEmail(v: string): boolean {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(v ?? '').trim()) && String(v).length <= 254;
+  }
+
+  // ─── PayPal « Amis & Famille » ───────────────────────────────────────────────
+
+  /**
+   * Référence unique que le client doit mettre en NOTE de son virement F&F : c'est elle qui relie le paiement (IPN) à la
+   * commande. Générée avec un aléa cryptographique (non devinable : sinon n'importe qui pourrait payer « pour » une autre commande).
+   */
+  newPaypalReference(): string {
+    return `UHQ-${randomBytes(5).toString('hex').toUpperCase()}`;
+  }
+
+  paypalReceiver(): string {
+    const s = this.store.paymentSettings;
+    if (!s.paypalEnabled || !this.isEmail(s.paypalEmail)) throw new ServiceUnavailableException('Paiement PayPal non configuré');
+    return s.paypalEmail.trim();
+  }
+
+  /**
+   * Vérifie un IPN PayPal : le corps BRUT reçu est renvoyé tel quel à PayPal précédé de `cmd=_notify-validate` ; seule la
+   * réponse « VERIFIED » prouve que la notification vient réellement de PayPal (jamais de confiance en son contenu avant).
+   * `PAYPAL_IPN_URL` (environnement uniquement) ne sert qu'aux tests avec un faux serveur PayPal.
+   */
+  async verifyPaypalIpn(rawBody: Buffer): Promise<Record<string, string>> {
+    const raw = rawBody.toString('utf8');
+    if (!raw || raw.length > 20_000) throw new BadRequestException('IPN invalide');
+    // Évite d'ouvrir une requête vers PayPal pour du bruit : un IPN de paiement porte toujours un txn_id.
+    if (!/(^|&)txn_id=/.test(raw)) throw new BadRequestException('IPN invalide');
+    let res: Response;
+    try {
+      res = await fetch(process.env.PAYPAL_IPN_URL || 'https://ipnpb.paypal.com/cgi-bin/webscr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'UHQ-Panel-OS-Orders' },
+        body: `cmd=_notify-validate&${raw}`,
+        signal: AbortSignal.timeout(15_000),
+        redirect: 'error',
+      });
+    } catch (e: any) {
+      this.logger.warn(`Vérification IPN PayPal impossible : ${e?.message ?? e}`);
+      throw new ServiceUnavailableException('Vérification PayPal indisponible');
+    }
+    const verdict = (await res.text().catch(() => '')).trim();
+    if (verdict !== 'VERIFIED') {
+      this.logger.warn(`IPN PayPal non vérifié (${verdict.slice(0, 20) || res.status})`);
+      throw new BadRequestException('IPN non vérifié');
+    }
+    return Object.fromEntries(new URLSearchParams(raw).entries());
+  }
+
+
 
   // ─── Stripe ──────────────────────────────────────────────────────────────────
 

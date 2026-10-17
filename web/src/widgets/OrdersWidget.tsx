@@ -7,7 +7,7 @@ import { useT } from '../i18n';
 import { useFetch } from '../lib/api';
 import { fmtMoney } from '../lib/format';
 
-interface Stats { orders: number; pending: number; toFulfill: number; revenue: number; currency: string; activeProducts: number }
+interface Stats { orders: number; pending: number; toFulfill: number; toApprove?: number; revenue: number; currency: string; activeProducts: number }
 
 export default function OrdersWidget() {
   const { token, lang, role } = useAddon();
@@ -16,7 +16,7 @@ export default function OrdersWidget() {
   if (!data) return null;
 
   const stats = [
-    { label: t('ordersCount'), value: String(data.orders), sub: data.toFulfill > 0 ? t('toFulfillCount', { n: data.toFulfill }) : t('noPending') },
+    { label: t('ordersCount'), value: String(data.orders), sub: ((data.toApprove ?? 0) > 0) ? t('toApprove') + ' : ' + data.toApprove : data.toFulfill > 0 ? t('toFulfillCount', { n: data.toFulfill }) : t('noPending') },
     { label: t('revenue'), value: fmtMoney(data.revenue, data.currency, lang), sub: 'Orders' },
     { label: t('activeProducts'), value: String(data.activeProducts), sub: t('products') },
   ];
