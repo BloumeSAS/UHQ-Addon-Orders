@@ -114,7 +114,11 @@ export class InvoiceService {
     const vatRate = Math.max(0, Math.min(100, Number(st.vat_rate) || 0));
     const lines = payment.kind === 'renewal'
       ? [{ name: `${tr.renewal} — ${payment.description}`, qty: 1, unit: payment.amount }]
-      : order.items.map((l) => ({ name: l.name, qty: l.quantity, unit: l.unit_price }));
+      : [
+          ...order.items.map((l) => ({ name: l.name, qty: l.quantity, unit: l.unit_price })),
+          // Code promo : ligne négative pour que le détail corresponde au total réellement encaissé.
+          ...(order.promo && order.promo.amount > 0 ? [{ name: `${lang === 'fr' ? 'Code promo' : 'Promo code'} ${order.promo.code}`, qty: 1, unit: -order.promo.amount }] : []),
+        ];
     const gross = (v: number) => (st.prices_include_vat ? v : v * (1 + vatRate / 100));
     const net = (v: number) => (st.prices_include_vat ? v / (1 + vatRate / 100) : v);
 

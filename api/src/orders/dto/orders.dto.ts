@@ -93,6 +93,13 @@ export class CreateProductDto {
   @IsOptional()
   @IsBoolean()
   renewal_enabled?: boolean;
+
+  /** 'per_gb' : le prix est celui d'un Go et le client choisit la quantité (livraison « compte proxy » requise). */
+  @IsOptional() @IsIn(['fixed', 'per_gb']) pricing?: 'fixed' | 'per_gb';
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0.01) @Max(100_000) min_gb?: number;
+  /** 0 = pas de plafond. */
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @Max(1_000_000) max_gb?: number;
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0.01) @Max(100_000) step_gb?: number;
 }
 
 export class UpdateProductDto {
@@ -105,6 +112,10 @@ export class UpdateProductDto {
   @IsOptional() @IsBoolean() active?: boolean;
   @IsOptional() @ValidateNested() @Type(() => DeliveryConfigDto) delivery?: DeliveryConfigDto;
   @IsOptional() @IsBoolean() renewal_enabled?: boolean;
+  @IsOptional() @IsIn(['fixed', 'per_gb']) pricing?: 'fixed' | 'per_gb';
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0.01) @Max(100_000) min_gb?: number;
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @Max(1_000_000) max_gb?: number;
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0.01) @Max(100_000) step_gb?: number;
 }
 
 export class OrderItemDto {
@@ -116,6 +127,9 @@ export class OrderItemDto {
   @Min(1)
   @Max(10_000)
   quantity!: number;
+
+  /** Vente au Go : quantité de Go souhaitée (obligatoire pour un produit « au Go »). */
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0.01) @Max(1_000_000) gb?: number;
 }
 
 export class PlaceOrderDto {
@@ -132,6 +146,9 @@ export class PlaceOrderDto {
 
   /** Le client active le renouvellement automatique (solde Wallet) des produits qui le proposent. */
   @IsOptional() @IsBoolean() renew?: boolean;
+
+  /** Code promo de réduction (addon Codes promo) — contrôlé et appliqué côté serveur. */
+  @IsOptional() @IsString() @MaxLength(60) promo_code?: string;
 
   /** Requis pour stripe/nowpayments — URL de retour après paiement. */
   @IsOptional() @IsString() @MaxLength(2000) successUrl?: string;
@@ -166,4 +183,31 @@ export class BillingProfileDto {
   @IsOptional() @IsString() @MaxLength(120) company?: string;
   @IsOptional() @IsString() @MaxLength(400) address?: string;
   @IsOptional() @IsString() @MaxLength(40) vat_number?: string;
+}
+
+/** Devis : total d'un panier avec un code promo, sans rien créer. */
+export class QuoteDto {
+  @IsArray()
+  @ArrayNotEmpty()
+  @ValidateNested({ each: true })
+  @Type(() => OrderItemDto)
+  items!: OrderItemDto[];
+
+  @IsOptional() @IsIn(['wallet', 'stripe', 'nowpayments', 'paypal']) paymentMethod?: 'wallet' | 'stripe' | 'nowpayments' | 'paypal';
+  @IsOptional() @IsString() @MaxLength(60) promo_code?: string;
+}
+
+/** Recharge du solde payée via les passerelles d'Orders (appelée par l'addon Wallet — X-Panel-Key). */
+export class TopupDto {
+  @IsString() @MaxLength(120) user_id!: string;
+  @IsOptional() @IsString() @MaxLength(254) user_email?: string;
+  /** Montant payé par le client. */
+  @Type(() => Number) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0.5) @Max(1_000_000) amount!: number;
+  /** Crédit versé avant code promo (montant + bonus de palier calculé par le Wallet). */
+  @Type(() => Number) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0.5) @Max(10_000_000) base_credit!: number;
+  @IsOptional() @IsString() @MaxLength(60) promo_code?: string;
+  @IsIn(['stripe', 'nowpayments', 'paypal']) paymentMethod!: 'stripe' | 'nowpayments' | 'paypal';
+  @IsOptional() @IsString() @MaxLength(2000) successUrl?: string;
+  @IsOptional() @IsString() @MaxLength(2000) cancelUrl?: string;
+  @IsOptional() @IsString() @MaxLength(3) currency?: string;
 }

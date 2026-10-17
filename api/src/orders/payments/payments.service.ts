@@ -161,15 +161,18 @@ export class PaymentsService {
     const stripe = this.stripeClient();
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
-      line_items: order.items.map((l) => ({
-        price_data: {
-          currency: order.currency.toLowerCase(),
-          product_data: { name: l.name },
-          // Stripe attend le plus petit sous-multiple (centimes) — 2 décimales max déjà garanties en amont.
-          unit_amount: Math.round(l.unit_price * 100),
-        },
-        quantity: l.quantity,
-      })),
+      // Avec un code promo, le détail des lignes ne correspond plus au total à payer : une seule ligne = le total réel.
+      line_items: order.promo
+        ? [{ price_data: { currency: order.currency.toLowerCase(), product_data: { name: `${order.note ?? 'Commande'} (code ${order.promo.code})`.slice(0, 250) }, unit_amount: Math.round(order.total * 100) }, quantity: 1 }]
+        : order.items.map((l) => ({
+            price_data: {
+              currency: order.currency.toLowerCase(),
+              product_data: { name: l.name },
+              // Stripe attend le plus petit sous-multiple (centimes) — 2 décimales max déjà garanties en amont.
+              unit_amount: Math.round(l.unit_price * 100),
+            },
+            quantity: l.quantity,
+          })),
       success_url: successUrl,
       cancel_url: cancelUrl,
       metadata: { order_id: order.id },

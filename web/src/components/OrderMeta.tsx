@@ -18,6 +18,9 @@ export interface Product {
   renewal_enabled?: boolean;
   /** Caractéristiques commerciales (0 = illimité) — fournies aux clients à la place de la config de livraison. */
   specs?: ProductSpecs | null;
+  /** 'per_gb' : `price` = prix d'un Go, le client choisit la quantité (min / max / pas). */
+  pricing?: 'fixed' | 'per_gb';
+  per_gb?: { min_gb: number; max_gb: number; step_gb: number } | null;
 }
 
 export interface ProductSpecs {
@@ -29,6 +32,7 @@ export interface ProductSpecs {
   country_filter: string;
   sticky_session_ttl: number;
   manual_approval: boolean;
+  variable_traffic?: boolean;
 }
 
 export interface DeliveryAccount {
@@ -56,6 +60,7 @@ export interface OrderLine {
   name: string;
   unit_price: number;
   quantity: number;
+  gb?: number;
 }
 
 export interface Delivered {
@@ -92,6 +97,10 @@ export interface Order {
   renew?: boolean;
   paypal?: { email: string; note: string; txn_id?: string; payer_email?: string; payer_name?: string };
   payment_alert?: string;
+  kind?: 'shop' | 'topup';
+  subtotal?: number;
+  promo?: { code: string; amount: number };
+  topup?: { paid: number; credit: number; base_credit: number; bonus: number };
   approved_by?: string;
   created_at: string;
   updated_at: string;
@@ -186,7 +195,7 @@ export function ProductSpecsList({ specs }: { specs: ProductSpecs }) {
   const t = useT();
   const { lang } = useAddon();
   const items: { icon: 'layers' | 'zap' | 'clock' | 'package' | 'truck'; label: string; value: string }[] = [
-    { icon: 'package', label: t('spec.traffic'), value: specs.traffic_limit_bytes > 0 ? fmtBytes(specs.traffic_limit_bytes, lang) : t('spec.unlimited') },
+    { icon: 'package', label: t('spec.traffic'), value: specs.variable_traffic ? t('spec.choose') : specs.traffic_limit_bytes > 0 ? fmtBytes(specs.traffic_limit_bytes, lang) : t('spec.unlimited') },
     { icon: 'layers', label: t('spec.threads'), value: specs.threads_limit > 0 ? String(specs.threads_limit) : t('spec.unlimited') },
     { icon: 'zap', label: t('spec.bandwidth'), value: specs.bandwidth_limit > 0 ? `${specs.bandwidth_limit} ${t('spec.kbps')}` : t('spec.unlimited') },
     { icon: 'clock', label: t('spec.validity'), value: fmtValidity(t, specs.expires_value, specs.expires_unit) },

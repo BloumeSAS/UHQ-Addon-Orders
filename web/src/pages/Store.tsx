@@ -10,7 +10,19 @@ import { Credentials, Delivered, Order, PayMethod, Product, ProductSpecsList, sh
 import { Badge, Card, Empty, ErrorBox, Field, Modal, Notice, PageSkeleton, SearchInput, Seg, Switch, Tabs } from '../components/ui';
 
 interface Balance { balance: number; currency: string; available: boolean }
-interface Methods { wallet: boolean; stripe: { enabled: boolean }; nowpayments: { enabled: boolean }; paypal?: { enabled: boolean } }
+interface Methods { wallet: boolean; stripe: { enabled: boolean }; nowpayments: { enabled: boolean }; paypal?: { enabled: boolean }; promo?: boolean }
+interface PromoQuote { subtotal: number; discount: number; total: number; promo?: { valid: boolean; reason?: string; code?: string; label?: string } }
+
+const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+/** Adresse de retour après paiement : la page du PANEL qui contient cet addon (le jeton y est re-transmis), sinon la page courante. */
+function returnBase(): string {
+  try {
+    return (window.top ?? window).location.href.split('#')[0].split('?')[0];
+  } catch {
+    return window.location.href.split('#')[0].split('?')[0];
+  }
+}
 interface Billing { name: string; company: string; address: string; vat_number: string }
 
 type Tab = 'shop' | 'orders';
@@ -38,6 +50,12 @@ export default function Store() {
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<Sort>('recent');
   const [cart, setCart] = useState<Record<string, number>>({});
+  /** Vente au Go : Go choisis par produit (défaut = minimum). */
+  const [gbs, setGbs] = useState<Record<string, number>>({});
+  const [promoInput, setPromoInput] = useState('');
+  const [promoCode, setPromoCode] = useState('');
+  const [promoQuote, setPromoQuote] = useState<PromoQuote | null>(null);
+  const [promoErr, setPromoErr] = useState('');
   const [payWith, setPayWith] = useState<PayMethod>('wallet');
   const [confirming, setConfirming] = useState(false);
   const [placing, setPlacing] = useState(false);
@@ -74,9 +92,13 @@ export default function Store() {
     return r;
   }, [list, search, sort]);
 
+  const gbOf = (p: Product) => gbs[p.id] ?? p.per_gb?.min_gb ?? 1;
+  const unitPrice = (p: Product) => (p.pricing === 'per_gb' ? round2(p.price * gbOf(p)) : p.price);
   const lines = Object.entries(cart).map(([id, qty]) => ({ product: byId.get(id), qty })).filter((l): l is { product: Product; qty: number } => !!l.product);
   const count = lines.reduce((s, l) => s + l.qty, 0);
-  const total = Math.round(lines.reduce((s, l) => s + l.product.price * l.qty, 0) * 100) / 100;
+  const subtotal = Math.round(lines.reduce((s, l) => s + unitPrice(l.product) * l.qty, 0) * 100) / 100;
+  const discount = promoQuote?.promo?.valid ? promoQuote.discount : 0;
+  const total = Math.max(0, round2(subtotal - discount));
   const walletDown = !!balance.data && !balance.data.available;
   const bal = balance.data?.available ? balance.data.balance : null;
   const missing = payWith === 'wallet' && bal !== null && total > bal ? Math.round((total - bal) * 100) / 100 : 0;
@@ -91,8 +113,29 @@ export default function Store() {
     if (walletDown && payWith === 'wallet') setPayWith(stripeOn ? 'stripe' : cryptoOn ? 'nowpayments' : paypalOn ? 'paypal' : 'wallet');
   }, [walletDown, stripeOn, cryptoOn, paypalOn]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Code promo : (re)calculé côté serveur dès que le panier ou le moyen de paiement change.
+  const cartKey = JSON.stringify([lines.map((l) => [l.product.id, l.qty, l.product.pricing === 'per_gb' ? gbOf(l.product) : 0]), payWith, promoCode]);
+  useEffect(() => {
+    if (!promoCode || lines.length === 0) { setPromoQuote(null); return; }
+    let alive = true;
+    const h = setTimeout(() => {
+      api.post<PromoQuote>('promo/quote', {
+        items: lines.map((l) => ({ product_id: l.product.id, quantity: l.qty, ...(l.product.pricing === 'per_gb' ? { gb: gbOf(l.product) } : {}) })),
+        paymentMethod: payWith,
+        promo_code: promoCode,
+      })
+        .then((q) => {
+          if (!alive) return;
+          setPromoQuote(q);
+          setPromoErr(q.promo && !q.promo.valid ? (t(`reason.${q.promo.reason}`) !== `reason.${q.promo.reason}` ? t(`reason.${q.promo.reason}`) : t('promoBad')) : '');
+        })
+        .catch((e) => { if (alive) { setPromoQuote(null); setPromoErr(String(e.message) === 'PROMO_UNAVAILABLE' ? t('promoUnavailable') : String(e.message)); } });
+    }, 300);
+    return () => { alive = false; clearTimeout(h); };
+  }, [cartKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const setQty = (p: Product, qty: number) => {
-    const max = p.stock === null ? 999 : p.stock;
+    const max = p.pricing === 'per_gb' ? Math.min(10, p.stock === null ? 10 : p.stock) : p.stock === null ? 999 : p.stock;
     const n = Math.max(0, Math.min(max, qty));
     setCart((c) => {
       const next = { ...c };
@@ -118,12 +161,13 @@ export default function Store() {
   }, [byId]);
 
   const place = async () => {
-    const items = lines.map((l) => ({ product_id: l.product.id, quantity: l.qty }));
+    const items = lines.map((l) => ({ product_id: l.product.id, quantity: l.qty, ...(l.product.pricing === 'per_gb' ? { gb: gbOf(l.product) } : {}) }));
+    const promo_code = promoQuote?.promo?.valid ? promoCode : undefined;
     if (!items.length) return;
     setPlacing(true);
     try {
       if (payWith === 'wallet') {
-        const r = await api.post<{ order: Order }>('orders', { items, paymentMethod: 'wallet', renew: renewable && renew });
+        const r = await api.post<{ order: Order }>('orders', { items, paymentMethod: 'wallet', renew: renewable && renew, promo_code });
         setCart({});
         setConfirming(false);
         setDone(r.order);
@@ -132,7 +176,7 @@ export default function Store() {
       }
       if (payWith === 'paypal') {
         // Pas de redirection : le client envoie lui-même le virement « Amis & Famille » avec la note indiquée.
-        const r = await api.post<{ order: Order }>('orders', { items, paymentMethod: 'paypal' });
+        const r = await api.post<{ order: Order }>('orders', { items, paymentMethod: 'paypal', promo_code });
         setCart({});
         setConfirming(false);
         setPaypalOrder(r.order);
@@ -140,12 +184,14 @@ export default function Store() {
         return;
       }
       // Les passerelles refusent d'être affichées dans une iframe (anti-clickjacking) : on redirige le NAVIGATEUR ENTIER.
-      const returnBase = window.location.href.split('?')[0];
+      const base = returnBase();
+      const sep = base.includes('?') ? '&' : '?';
       const r = await api.post<{ checkoutUrl?: string }>('orders', {
         items,
         paymentMethod: payWith,
-        successUrl: `${returnBase}?payment=success`,
-        cancelUrl: `${returnBase}?payment=cancelled`,
+        promo_code,
+        successUrl: `${base}${sep}payment=success`,
+        cancelUrl: `${base}${sep}payment=cancelled`,
       });
       if (!r.checkoutUrl) throw new Error(t('paymentUrlMissing'));
       (window.top ?? window).location.href = r.checkoutUrl;
@@ -247,9 +293,14 @@ export default function Store() {
                           {p.specs?.manual_approval && <Badge tone="warn" icon="eye">{t('manualApproval')}</Badge>}
                         </div>
                       )}
+                      {p.pricing === 'per_gb' && p.per_gb && (
+                        <GbPicker product={p} gb={gbOf(p)} onChange={(v) => setGbs((g) => ({ ...g, [p.id]: v }))} lang={lang} />
+                      )}
                       <div className="row-between">
-                        <span className="product-price">{fmtMoney(p.price, p.currency, lang)}</span>
-                        {qty > 0 ? (
+                        <span className="product-price">{p.pricing === 'per_gb' ? <>{fmtMoney(unitPrice(p), p.currency, lang)}<span className="text-xs text-muted"> · {fmtMoney(p.price, p.currency, lang)}/{t('perGb')}</span></> : fmtMoney(p.price, p.currency, lang)}</span>
+                        {qty > 0 && p.pricing === 'per_gb' ? (
+                          <button className="btn btn-outline btn-sm" onClick={() => setQty(p, 0)}><Icon name="check" size={14} />{t('inCart')}</button>
+                        ) : qty > 0 ? (
                           <div className="stepper" role="group" aria-label={p.name}>
                             <button onClick={() => setQty(p, qty - 1)} aria-label={`${t('decrease')} ${p.name}`}>−</button>
                             <span aria-live="polite">{qty}</span>
@@ -277,14 +328,33 @@ export default function Store() {
                     {lines.map(({ product: p, qty }) => (
                       <div key={p.id} className="cart-line">
                         <div className="grow">
-                          <div className="text-bold truncate">{p.name}</div>
-                          <div className="text-xs text-muted">{qty} × {fmtMoney(p.price, p.currency, lang)}</div>
+                          <div className="text-bold truncate">{p.name}{p.pricing === 'per_gb' ? ` — ${gbOf(p)} ${t('gbUnit')}` : ''}</div>
+                          <div className="text-xs text-muted">{qty} × {fmtMoney(unitPrice(p), p.currency, lang)}</div>
                         </div>
-                        <b className="num">{fmtMoney(p.price * qty, p.currency, lang)}</b>
+                        <b className="num">{fmtMoney(unitPrice(p) * qty, p.currency, lang)}</b>
                         <button className="btn btn-ghost btn-icon btn-sm" onClick={() => setQty(p, 0)} aria-label={`${t('remove')} ${p.name}`}><Icon name="trash" size={14} /></button>
                       </div>
                     ))}
                   </div>
+                  {methods.data?.promo && (
+                    <div className="stack-sm">
+                      <div className="label">{t('promoCode')}</div>
+                      <form className="row" style={{ flexWrap: 'nowrap' }} onSubmit={(e) => { e.preventDefault(); setPromoErr(''); setPromoCode(promoInput.trim().toUpperCase()); }}>
+                        <input className="input mono" value={promoInput} onChange={(e) => setPromoInput(e.target.value.toUpperCase())} placeholder={t('promoPlaceholder')} maxLength={60} autoComplete="off" spellCheck={false} aria-label={t('promoCode')} />
+                        {promoQuote?.promo?.valid
+                          ? <button type="button" className="btn btn-outline btn-sm" onClick={() => { setPromoCode(''); setPromoInput(''); setPromoQuote(null); setPromoErr(''); }}>{t('remove')}</button>
+                          : <button type="submit" className="btn btn-outline btn-sm" disabled={!promoInput.trim()}>{t('apply')}</button>}
+                      </form>
+                      {promoErr && <span className="error-text">{promoErr}</span>}
+                      {promoQuote?.promo?.valid && <span className="hint text-green">✓ {t('promoApplied', { label: promoQuote.promo.label || promoQuote.promo.code || '' })}</span>}
+                    </div>
+                  )}
+                  {discount > 0 && (
+                    <>
+                      <div className="row-between text-sm"><span className="text-muted">{t('subtotal')}</span><span>{fmtMoney(subtotal, currency, lang)}</span></div>
+                      <div className="row-between text-sm"><span className="text-muted">{t('discount')}</span><b className="text-green">−{fmtMoney(discount, currency, lang)}</b></div>
+                    </>
+                  )}
                   <div className="row-between"><span className="text-muted">{t('total')}</span><b style={{ fontSize: '1.25rem' }}>{fmtMoney(total, currency, lang)}</b></div>
 
                   {(stripeOn || cryptoOn) && (
@@ -379,6 +449,12 @@ export default function Store() {
                       </li>
                     ))}
                   </ul>
+                  {o.promo && o.promo.amount > 0 && (
+                    <div className="row-between text-sm"><span className="text-muted">{t('promoLine', { code: o.promo.code })}</span><b className="text-green">−{fmtMoney(o.promo.amount, o.currency, lang)}</b></div>
+                  )}
+                  {o.kind === 'topup' && o.topup && (
+                    <div className="row-between text-sm"><span className="text-muted">{t('topupCredit')}</span><b>+{fmtMoney(o.topup.credit, o.currency, lang)}{o.topup.bonus > 0 ? ` (${t('topupBonusIn', { v: fmtMoney(o.topup.bonus, o.currency, lang) })})` : ''}</b></div>
+                  )}
                   <Timeline order={o} />
                   {o.status === 'pending' && o.payment_method === 'paypal' && o.paypal && (
                     <div className="row-between">
@@ -424,8 +500,9 @@ export default function Store() {
         >
           <div className="stack-sm">
             {lines.map(({ product: p, qty }) => (
-              <div key={p.id} className="row-between text-sm"><span>{qty} × {p.name}</span><b>{fmtMoney(p.price * qty, p.currency, lang)}</b></div>
+              <div key={p.id} className="row-between text-sm"><span>{qty} × {p.name}{p.pricing === 'per_gb' ? ` — ${gbOf(p)} ${t('gbUnit')}` : ''}</span><b>{fmtMoney(unitPrice(p) * qty, p.currency, lang)}</b></div>
             ))}
+            {discount > 0 && <div className="row-between text-sm"><span>{t('discount')} ({promoCode})</span><b className="text-green">−{fmtMoney(discount, currency, lang)}</b></div>}
             <div className="row-between" style={{ borderTop: '1px solid var(--border)', paddingTop: '0.6rem' }}><b>{t('total')}</b><b style={{ fontSize: '1.15rem' }}>{fmtMoney(total, currency, lang)}</b></div>
             <Notice tone="info">{payWith === 'wallet' ? t('confirmWalletText', { v: fmtMoney(total, currency, lang) }) : t('confirmExternalText')}</Notice>
             {lines.some((l) => l.product.delivery?.mode === 'panel_account') && <div className="text-xs text-muted">{t('autoDeliveryNote')}</div>}
@@ -556,5 +633,45 @@ function BillingModal({ onClose }: { onClose: () => void }) {
         <Field label={t('billingVat')}><input className="input" value={v.vat_number} maxLength={40} onChange={(e) => set('vat_number', e.target.value)} /></Field>
       </div>
     </Modal>
+  );
+}
+
+// ─── Sélecteur de Go (vente au Go) ─────────────────────────────────────────────
+
+function GbPicker({ product: p, gb, onChange, lang }: { product: Product; gb: number; onChange: (v: number) => void; lang: 'fr' | 'en' }) {
+  const t = useT();
+  const cfg = p.per_gb!;
+  const max = cfg.max_gb > 0 ? cfg.max_gb : Math.max(cfg.min_gb * 100, 1000);
+  const [text, setText] = useState(String(gb));
+  useEffect(() => { setText(String(gb)); }, [gb]);
+  const clamp = (v: number) => {
+    if (!Number.isFinite(v)) return cfg.min_gb;
+    const stepped = cfg.min_gb + Math.round((v - cfg.min_gb) / cfg.step_gb) * cfg.step_gb;
+    return Math.round(Math.min(max, Math.max(cfg.min_gb, stepped)) * 100) / 100;
+  };
+  return (
+    <div className="gb-picker stack-sm">
+      <div className="row-between">
+        <span className="text-sm text-muted">{t('chooseGb')}</span>
+        <span className="text-xs text-muted">{t('gbRange', { min: cfg.min_gb, max: cfg.max_gb > 0 ? cfg.max_gb : '∞' })}</span>
+      </div>
+      <div className="row" style={{ flexWrap: 'nowrap' }}>
+        <button type="button" className="btn btn-outline btn-icon" onClick={() => onChange(clamp(gb - cfg.step_gb))} disabled={gb <= cfg.min_gb} aria-label={t('decrease')}>−</button>
+        <div className="input-affix grow">
+          <input
+            className="input" inputMode="decimal" value={text} aria-label={`${p.name} — ${t('gbUnit')}`}
+            onChange={(e) => setText(e.target.value)}
+            onBlur={() => onChange(clamp(Number(text.replace(',', '.'))))}
+            onKeyDown={(e) => { if (e.key === 'Enter') onChange(clamp(Number(text.replace(',', '.')))); }}
+          />
+        </div>
+        <span className="text-sm text-muted">{t('gbUnit')}</span>
+        <button type="button" className="btn btn-outline btn-icon" onClick={() => onChange(clamp(gb + cfg.step_gb))} disabled={cfg.max_gb > 0 && gb >= cfg.max_gb} aria-label={t('increase')}>+</button>
+      </div>
+      {cfg.max_gb > 0 && cfg.max_gb / cfg.step_gb <= 400 && (
+        <input type="range" min={cfg.min_gb} max={cfg.max_gb} step={cfg.step_gb} value={gb} onChange={(e) => onChange(clamp(Number(e.target.value)))} aria-label={t('chooseGb')} style={{ width: '100%' }} />
+      )}
+      <div className="text-xs text-muted">{fmtMoney(p.price, p.currency, lang)} / {t('perGb')}</div>
+    </div>
   );
 }

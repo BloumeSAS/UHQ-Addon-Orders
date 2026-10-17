@@ -125,11 +125,11 @@ function ProductsTab({ onChanged }: { onChanged: () => void }) {
                         <div className="text-bold">{p.name}</div>
                         <div className="text-xs text-muted truncate" style={{ maxWidth: 320 }}>{p.description || t('noDescription')}</div>
                       </td>
-                      <td className="num"><b>{fmtMoney(p.price, p.currency, lang)}</b></td>
+                      <td className="num"><b>{fmtMoney(p.price, p.currency, lang)}</b>{p.pricing === 'per_gb' && <div className="text-xs text-muted">/ {t('perGb')}</div>}</td>
                       <td>{p.stock === null ? <span className="text-muted">∞ {t('unlimited')}</span> : <Badge tone={p.stock <= 0 ? 'bad' : low ? 'warn' : 'muted'}>{p.stock <= 0 ? t('outOfStock') : t('units', { n: p.stock })}</Badge>}</td>
                       <td>
                         {p.delivery?.mode === 'panel_account'
-                          ? <div className="row gap-1"><Badge tone="good" icon="zap">{p.delivery.account?.custom_proxies ? t('deliveryPrivate') : p.delivery.account?.pool ? p.delivery.account.pool : t('deliveryPool')}</Badge>{p.delivery.approval === 'manual' && <Badge tone="warn" icon="eye">{t('manualApproval')}</Badge>}{p.renewal_enabled && <Badge tone="info" icon="refresh">{t('renewable')}</Badge>}</div>
+                          ? <div className="row gap-1"><Badge tone="good" icon="zap">{p.delivery.account?.custom_proxies ? t('deliveryPrivate') : p.delivery.account?.pool ? p.delivery.account.pool : t('deliveryPool')}</Badge>{p.delivery.approval === 'manual' && <Badge tone="warn" icon="eye">{t('manualApproval')}</Badge>}{p.renewal_enabled && <Badge tone="info" icon="refresh">{t('renewable')}</Badge>}{p.pricing === 'per_gb' && <Badge tone="primary" icon="layers">{t('pricingPerGbShort')}</Badge>}</div>
                           : <span className="text-muted text-sm">{t('deliveryManual')}</span>}
                       </td>
                       <td><Switch checked={p.active} onChange={(v) => void toggleActive(p, v)} label={t('active')} /></td>
@@ -164,6 +164,7 @@ interface Form {
   name: string; description: string; price: string; currency: string; unlimited: boolean; stock: string; active: boolean;
   mode: 'none' | 'panel_account';
   approval: 'auto' | 'manual'; renewal: boolean; expiresUnit: 'day' | 'month' | 'year';
+  pricing: 'fixed' | 'per_gb'; minGb: string; maxGb: string; stepGb: string;
   threads: string; trafficGb: string; bandwidth: string; expiresDays: string; country: string; ttl: string; allowedIps: string; tags: string; pool: string; custom: string;
 }
 
@@ -174,6 +175,8 @@ function toForm(p: Product | null): Form {
     unlimited: p ? p.stock === null : true, stock: p?.stock != null ? String(p.stock) : '10', active: p?.active ?? true,
     mode: p?.delivery?.mode ?? 'none',
     approval: p?.delivery?.approval === 'manual' ? 'manual' : 'auto', renewal: !!p?.renewal_enabled, expiresUnit: a.expires_unit ?? 'day',
+    pricing: p?.pricing === 'per_gb' ? 'per_gb' : 'fixed',
+    minGb: p?.per_gb ? String(p.per_gb.min_gb) : '1', maxGb: p?.per_gb && p.per_gb.max_gb > 0 ? String(p.per_gb.max_gb) : '', stepGb: p?.per_gb ? String(p.per_gb.step_gb) : '1',
     threads: a.threads_limit != null ? String(a.threads_limit) : '',
     trafficGb: a.traffic_limit_bytes ? String(Math.round((a.traffic_limit_bytes / GB) * 100) / 100) : '',
     bandwidth: a.bandwidth_limit != null ? String(a.bandwidth_limit) : '',
@@ -202,6 +205,13 @@ function ProductModal({ product, pools, onClose, onSaved }: { product: Product |
   if (f.price.trim() === '' || !Number.isFinite(price) || price < 0 || price > 1_000_000 || Math.abs(price * 100 - Math.round(price * 100)) > 1e-6) errors.price = t('err.price');
   if (!/^[A-Za-z]{3}$/.test(f.currency)) errors.currency = t('err.currency');
   if (!f.unlimited && (!/^\d+$/.test(f.stock.trim()))) errors.stock = t('err.int');
+  if (f.pricing === 'per_gb') {
+    if (f.mode !== 'panel_account') errors.mode = t('err.perGbNeedsDelivery');
+    const mn = Number(f.minGb.replace(',', '.')), mx = f.maxGb.trim() === '' ? 0 : Number(f.maxGb.replace(',', '.')), st = Number(f.stepGb.replace(',', '.'));
+    if (!(mn > 0)) errors.minGb = t('err.number');
+    if (f.maxGb.trim() !== '' && !(mx >= mn)) errors.maxGb = t('err.maxGb');
+    if (!(st > 0)) errors.stepGb = t('err.number');
+  }
   if (f.mode === 'panel_account') {
     if (f.renewal && !(Number(f.expiresDays) > 0)) errors.expiresDays = t('err.renewalNeedsValidity');
     for (const k of ['threads', 'bandwidth', 'expiresDays', 'ttl'] as const) if (!isInt(f[k])) errors[k] = t('err.int');
@@ -223,13 +233,15 @@ function ProductModal({ product, pools, onClose, onSaved }: { product: Product |
       stock: f.unlimited ? null : parseInt(f.stock, 10),
       active: f.active,
       renewal_enabled: f.mode === 'panel_account' && f.renewal && Number(f.expiresDays) > 0,
+      pricing: f.pricing,
+      ...(f.pricing === 'per_gb' ? { min_gb: Number(f.minGb.replace(',', '.')), max_gb: f.maxGb.trim() === '' ? 0 : Number(f.maxGb.replace(',', '.')), step_gb: Number(f.stepGb.replace(',', '.')) } : {}),
       delivery: f.mode === 'panel_account'
         ? {
             mode: 'panel_account',
             approval: f.approval,
             account: {
               threads_limit: intOrUndef(f.threads),
-              traffic_limit_bytes: f.trafficGb.trim() !== '' && Number(f.trafficGb.replace(',', '.')) > 0 ? Math.round(Number(f.trafficGb.replace(',', '.')) * GB) : undefined,
+              traffic_limit_bytes: f.pricing !== 'per_gb' && f.trafficGb.trim() !== '' && Number(f.trafficGb.replace(',', '.')) > 0 ? Math.round(Number(f.trafficGb.replace(',', '.')) * GB) : undefined,
               country_filter: f.country.trim() || undefined,
               sticky_session_ttl: intOrUndef(f.ttl),
               bandwidth_limit: intOrUndef(f.bandwidth),
@@ -284,7 +296,7 @@ function ProductModal({ product, pools, onClose, onSaved }: { product: Product |
           <Field label={t('name')} error={show('name')}><input className={`input ${show('name') ? 'invalid' : ''}`} value={f.name} maxLength={120} onChange={(e) => set('name', e.target.value)} autoFocus placeholder={t('namePlaceholder')} /></Field>
           <Field label={t('description')} hint={t('descriptionHint')}><textarea className="input" value={f.description} maxLength={2000} onChange={(e) => set('description', e.target.value)} /></Field>
           <div className="form-grid">
-            <Field label={t('price')} error={show('price')}><input className={`input ${show('price') ? 'invalid' : ''}`} inputMode="decimal" value={f.price} onChange={(e) => set('price', e.target.value)} placeholder="9.99" /></Field>
+            <Field label={f.pricing === 'per_gb' ? t('pricePerGb') : t('price')} error={show('price')}><input className={`input ${show('price') ? 'invalid' : ''}`} inputMode="decimal" value={f.price} onChange={(e) => set('price', e.target.value)} placeholder={f.pricing === 'per_gb' ? '1.00' : '9.99'} /></Field>
             <Field label={t('currency')} error={show('currency')} hint={t('currencyHint')}><input className={`input ${show('currency') ? 'invalid' : ''}`} value={f.currency} maxLength={3} onChange={(e) => set('currency', e.target.value.toUpperCase())} /></Field>
           </div>
           <div className="stack-sm">
@@ -297,6 +309,28 @@ function ProductModal({ product, pools, onClose, onSaved }: { product: Product |
             <span className="hint">{t('stockHint')}</span>
           </div>
           <label className="row gap-3" style={{ cursor: 'pointer' }}><Switch checked={f.active} onChange={(v) => set('active', v)} label={t('active')} /><span><b>{t('active')}</b><div className="text-xs text-muted">{t('activeHint')}</div></span></label>
+        </section>
+
+        <section className="stack-sm">
+          <h4 className="section-title">{t('sectionPricing')}</h4>
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+            <button type="button" className={`choice ${f.pricing === 'fixed' ? 'active' : ''}`} onClick={() => set('pricing', 'fixed')}>
+              <Icon name="package" size={18} /><span><b>{t('pricingFixed')}</b><div className="text-xs text-muted">{t('pricingFixedHint')}</div></span>
+            </button>
+            <button type="button" className={`choice ${f.pricing === 'per_gb' ? 'active' : ''}`} onClick={() => { set('pricing', 'per_gb'); set('mode', 'panel_account'); }}>
+              <Icon name="layers" size={18} /><span><b>{t('pricingPerGb')}</b><div className="text-xs text-muted">{t('pricingPerGbHint')}</div></span>
+            </button>
+          </div>
+          {f.pricing === 'per_gb' && (
+            <div className="section-box stack-sm">
+              <div className="form-grid">
+                <Field label={t('minGb')} error={show('minGb')} hint={t('minGbHint')}><input className={`input ${show('minGb') ? 'invalid' : ''}`} inputMode="decimal" value={f.minGb} onChange={(e) => set('minGb', e.target.value)} /></Field>
+                <Field label={t('maxGb')} error={show('maxGb')} hint={t('maxGbHint')}><input className={`input ${show('maxGb') ? 'invalid' : ''}`} inputMode="decimal" value={f.maxGb} onChange={(e) => set('maxGb', e.target.value)} placeholder="∞" /></Field>
+                <Field label={t('stepGb')} error={show('stepGb')} hint={t('stepGbHint')}><input className={`input ${show('stepGb') ? 'invalid' : ''}`} inputMode="decimal" value={f.stepGb} onChange={(e) => set('stepGb', e.target.value)} /></Field>
+              </div>
+              <Notice tone="info">{t('perGbExample', { p: fmtMoney(Number(f.price.replace(',', '.')) || 0, f.currency || 'EUR', lang), min: f.minGb || 1 })}</Notice>
+            </div>
+          )}
         </section>
 
         <section className="stack-sm">
@@ -321,7 +355,7 @@ function ProductModal({ product, pools, onClose, onSaved }: { product: Product |
               </Field>
               <div className="form-grid">
                 <Field label={t('dThreads')} error={show('threads')} hint={t('emptyUnlimited')}><input className="input" inputMode="numeric" value={f.threads} onChange={(e) => set('threads', e.target.value)} placeholder="∞" /></Field>
-                <Field label={t('dTraffic')} error={show('trafficGb')} hint={t('dTrafficHint')}><input className="input" inputMode="decimal" value={f.trafficGb} onChange={(e) => set('trafficGb', e.target.value)} placeholder="∞" /></Field>
+                {f.pricing !== 'per_gb' && <Field label={t('dTraffic')} error={show('trafficGb')} hint={t('dTrafficHint')}><input className="input" inputMode="decimal" value={f.trafficGb} onChange={(e) => set('trafficGb', e.target.value)} placeholder="∞" /></Field>}
                 <Field label={t('dBandwidth')} error={show('bandwidth')} hint={t('emptyUnlimited')}><input className="input" inputMode="numeric" value={f.bandwidth} onChange={(e) => set('bandwidth', e.target.value)} placeholder="∞" /></Field>
                 <Field label={t('dValidity')} error={show('expiresDays')} hint={t('emptyNever')}>
                   <div className="row gap-2" style={{ flexWrap: 'nowrap' }}>
@@ -424,7 +458,7 @@ function OrdersTab({ onChanged }: { onChanged: () => void }) {
               <tbody>
                 {orders.map((o) => (
                   <tr key={o.id} className="clickable" onClick={() => setOpen(o)}>
-                    <td><b>{shortId(o.id)}</b><div className="text-xs text-muted">{fmtDateTime(o.created_at, lang)}</div></td>
+                    <td><b>{shortId(o.id)}</b>{o.kind === 'topup' && <> <Badge tone="info" icon="wallet">{t('kindTopup')}</Badge></>}<div className="text-xs text-muted">{fmtDateTime(o.created_at, lang)}</div></td>
                     <td><div className="truncate" style={{ maxWidth: 220 }}>{o.user_email || <span className="mono">{o.user_id.slice(0, 12)}…</span>}</div></td>
                     <td className="text-sm"><div className="truncate" style={{ maxWidth: 260 }}>{o.items.map((l) => `${l.quantity}× ${l.name}`).join(', ')}</div></td>
                     <td className="num"><b>{fmtMoney(o.total, o.currency, lang)}</b></td>
@@ -511,6 +545,8 @@ function OrderDrawer({ order: initial, onClose, onChanged }: { order: Order; onC
           <dt>{t('date')}</dt><dd>{fmtDateTime(order.created_at, lang)}</dd>
           <dt>{t('updatedAt')}</dt><dd>{fmtDateTime(order.updated_at, lang)}</dd>
           <dt>{t('total')}</dt><dd><b>{fmtMoney(order.total, order.currency, lang)}</b></dd>
+          {order.promo && <><dt>{t('promoCode')}</dt><dd><span className="mono">{order.promo.code}</span> · −{fmtMoney(order.promo.amount, order.currency, lang)}{order.subtotal ? <div className="text-xs text-muted">{t('subtotal')} {fmtMoney(order.subtotal, order.currency, lang)}</div> : null}</dd></>}
+          {order.topup && <><dt>{t('topupCredit')}</dt><dd><b>+{fmtMoney(order.topup.credit, order.currency, lang)}</b>{order.topup.bonus > 0 ? <div className="text-xs text-muted">{t('topupBonusIn', { v: fmtMoney(order.topup.bonus, order.currency, lang) })}</div> : null}</dd></>}
           {order.paypal && <><dt>{t('pay.paypal')}</dt><dd><div className="mono">{order.paypal.note}</div>{order.paypal.payer_email && <div className="text-xs text-muted">{order.paypal.payer_name ? `${order.paypal.payer_name} · ` : ''}{order.paypal.payer_email}</div>}{order.paypal.txn_id && <div className="text-xs text-muted">{t('txn')} {order.paypal.txn_id}</div>}</dd></>}
           {order.invoice_number && <><dt>{t('invoice')}</dt><dd className="mono">{order.invoice_number}</dd></>}
           {order.approved_by && <><dt>{t('approvedBy')}</dt><dd>{order.approved_by}</dd></>}

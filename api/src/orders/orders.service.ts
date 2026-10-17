@@ -9,7 +9,9 @@ import {
 import { WalletClient } from './wallet.client';
 import { PanelClient, CreateSubUserSpec } from './panel.client';
 import { PaymentsService } from './payments/payments.service';
-import { CreateProductDto, UpdateProductDto, OrderItemDto } from './dto/orders.dto';
+import { PromoClient, PromoResult } from './promo.client';
+import { PanelMailClient } from './mail.client';
+import { CreateProductDto, UpdateProductDto, OrderItemDto, TopupDto } from './dto/orders.dto';
 
 /**
  * Transitions de statut autorisées (jamais de retour en arrière : une commande annulée est définitive).
@@ -26,6 +28,9 @@ const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
 const PAID_STATES: OrderStatus[] = ['review', 'paid', 'fulfilled'];
 const RENEWAL_GRACE_MS = 72 * 3600_000;
 const DAY_MS = 86_400_000;
+const BYTES_PER_GB = 1_000_000_000;
+const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+const money = (v: number, cur: string) => `${v.toFixed(2).replace('.', ',')} ${cur === 'EUR' ? '€' : cur}`;
 
 export interface OrderQuery {
   status?: string;
@@ -58,6 +63,8 @@ export class OrdersService implements OnModuleInit {
     private readonly wallet: WalletClient,
     private readonly panel: PanelClient,
     private readonly payments: PaymentsService,
+    private readonly promo: PromoClient,
+    private readonly mail: PanelMailClient,
   ) {}
 
   /**
@@ -167,6 +174,17 @@ export class OrdersService implements OnModuleInit {
     }
   }
 
+  /** Vente au Go : bornes cohérentes et livraison « compte proxy » obligatoire (les Go sont la bande passante du compte). */
+  private normalizePerGb(pricing: string | undefined, input: { min_gb?: number; max_gb?: number; step_gb?: number }, delivery: DeliveryConfig): Pick<ProductRecord, 'pricing' | 'per_gb'> {
+    if (pricing !== 'per_gb') return { pricing: 'fixed', per_gb: undefined };
+    if (delivery.mode !== 'panel_account') throw new BadRequestException('La vente au Go nécessite une livraison « compte proxy ».');
+    const min = round2(Number(input.min_gb) > 0 ? Number(input.min_gb) : 1);
+    const max = round2(Number(input.max_gb) > 0 ? Number(input.max_gb) : 0);
+    const step = round2(Number(input.step_gb) > 0 ? Number(input.step_gb) : 1);
+    if (max > 0 && max < min) throw new BadRequestException('Le maximum de Go doit dépasser le minimum.');
+    return { pricing: 'per_gb', per_gb: { min_gb: min, max_gb: max, step_gb: step } };
+  }
+
   /** Le renouvellement exige une livraison automatique avec une durée de validité (sinon il n'y a rien à renouveler). */
   private assertRenewalPossible(renewal: boolean | undefined, delivery: DeliveryConfig): void {
     if (!renewal) return;
@@ -199,10 +217,13 @@ export class OrdersService implements OnModuleInit {
       active: p.active,
       delivery: { mode: p.delivery?.mode ?? 'none' },
       renewal_enabled: !!p.renewal_enabled,
+      pricing: p.pricing ?? 'fixed',
+      per_gb: p.pricing === 'per_gb' ? p.per_gb ?? { min_gb: 1, max_gb: 0, step_gb: 1 } : null,
       specs: auto
         ? {
             threads_limit: a?.threads_limit ?? 0,
-            traffic_limit_bytes: a?.traffic_limit_bytes ?? 0,
+            traffic_limit_bytes: p.pricing === 'per_gb' ? 0 : a?.traffic_limit_bytes ?? 0,
+            variable_traffic: p.pricing === 'per_gb',
             bandwidth_limit: a?.bandwidth_limit ?? 0,
             expires_value: a?.expires_days ?? 0,
             expires_unit: a?.expires_unit ?? 'day',
@@ -229,6 +250,7 @@ export class OrdersService implements OnModuleInit {
       active:      dto.active ?? true,
       delivery,
       renewal_enabled: !!dto.renewal_enabled,
+      ...this.normalizePerGb(dto.pricing, dto, delivery),
       created_at:  now,
       updated_at:  now,
     };
@@ -253,6 +275,10 @@ export class OrdersService implements OnModuleInit {
     if (dto.active !== undefined) product.active = dto.active;
     if (delivery) product.delivery = delivery;
     if (dto.renewal_enabled !== undefined) product.renewal_enabled = !!dto.renewal_enabled;
+    if (dto.pricing !== undefined || dto.min_gb !== undefined || dto.max_gb !== undefined || dto.step_gb !== undefined || delivery) {
+      const mode = dto.pricing ?? product.pricing ?? 'fixed';
+      Object.assign(product, this.normalizePerGb(mode, { min_gb: dto.min_gb ?? product.per_gb?.min_gb, max_gb: dto.max_gb ?? product.per_gb?.max_gb, step_gb: dto.step_gb ?? product.per_gb?.step_gb }, delivery ?? product.delivery));
+    }
     // Une livraison sans durée de validité ne peut plus être renouvelée.
     if (product.renewal_enabled && !(product.delivery.mode === 'panel_account' && Number(product.delivery.account?.expires_days) > 0)) product.renewal_enabled = false;
     product.updated_at = new Date().toISOString();
@@ -359,31 +385,39 @@ export class OrdersService implements OnModuleInit {
   private resolveLines(items: OrderItemDto[]): { lines: OrderItem[]; total: number; currency: string; needsPanelDelivery: boolean; needsApproval: boolean } {
     if (!items?.length) throw new BadRequestException('Panier vide');
 
-    // Une même référence peut apparaître deux fois : on cumule les quantités (le stock est contrôlé sur le total).
-    const merged = new Map<string, number>();
-    for (const item of items) merged.set(item.product_id, (merged.get(item.product_id) ?? 0) + Math.floor(item.quantity));
+    // Une même référence (prix fixe) peut apparaître deux fois : on cumule les quantités (le stock est contrôlé sur le total).
+    // Les lignes « au Go » restent séparées (chacune a sa quantité de Go).
+    const fixed = new Map<string, number>();
+    const perGb: { id: string; gb: number; qty: number }[] = [];
+    for (const item of items) {
+      const product = this.store.products[item.product_id];
+      if (product?.pricing === 'per_gb') perGb.push({ id: item.product_id, gb: Number(item.gb), qty: Math.floor(item.quantity) || 1 });
+      else fixed.set(item.product_id, (fixed.get(item.product_id) ?? 0) + Math.floor(item.quantity));
+    }
+    const stockUsed = new Map<string, number>();
 
     const lines: OrderItem[] = [];
     let currency = '';
     let needsPanelDelivery = false;
     let needsApproval = false;
-    for (const [productId, qty] of merged) {
+    const common = (productId: string, qty: number) => {
       const product = this.store.products[productId];
-      if (!product || !product.active) {
-        throw new BadRequestException(`Produit indisponible : ${productId}`);
-      }
+      if (!product || !product.active) throw new BadRequestException(`Produit indisponible : ${productId}`);
       if (qty < 1) throw new BadRequestException('Quantité invalide');
-      if (product.stock !== null && product.stock < qty) {
-        throw new BadRequestException(`Stock insuffisant : ${product.name}`);
-      }
-      if (currency && product.currency !== currency) {
-        throw new BadRequestException('Le panier mélange plusieurs devises : passez commande séparément.');
-      }
+      const used = (stockUsed.get(productId) ?? 0) + qty;
+      stockUsed.set(productId, used);
+      if (product.stock !== null && product.stock < used) throw new BadRequestException(`Stock insuffisant : ${product.name}`);
+      if (currency && product.currency !== currency) throw new BadRequestException('Le panier mélange plusieurs devises : passez commande séparément.');
       if (product.delivery?.mode === 'panel_account') {
         needsPanelDelivery = true;
         if (product.delivery.approval === 'manual') needsApproval = true;
       }
       currency = product.currency;
+      return product;
+    };
+
+    for (const [productId, qty] of fixed) {
+      const product = common(productId, qty);
       lines.push({
         product_id: product.id, name: product.name, unit_price: product.price, quantity: qty,
         // Configuration FIGÉE à la commande : la livraison (même validée plus tard) et les renouvellements l'utilisent,
@@ -392,7 +426,25 @@ export class OrdersService implements OnModuleInit {
       });
     }
 
-    const total = parseFloat(lines.reduce((s, l) => s + l.unit_price * l.quantity, 0).toFixed(2));
+    for (const g of perGb) {
+      const product = common(g.id, g.qty);
+      const cfg = product.per_gb ?? { min_gb: 1, max_gb: 0, step_gb: 1 };
+      if (!Number.isFinite(g.gb) || g.gb <= 0) throw new BadRequestException(`Indiquez la quantité de Go : ${product.name}`);
+      const gb = round2(g.gb);
+      if (gb < cfg.min_gb) throw new BadRequestException(`Minimum ${cfg.min_gb} Go : ${product.name}`);
+      if (cfg.max_gb > 0 && gb > cfg.max_gb) throw new BadRequestException(`Maximum ${cfg.max_gb} Go : ${product.name}`);
+      // Pas de sélection : (gb - min) doit être un multiple du pas (tolérance d'arrondi).
+      const steps = (gb - cfg.min_gb) / cfg.step_gb;
+      if (Math.abs(steps - Math.round(steps)) > 1e-6) throw new BadRequestException(`Les Go se commandent par pas de ${cfg.step_gb} : ${product.name}`);
+      const delivery: DeliveryConfig = JSON.parse(JSON.stringify(product.delivery ?? { mode: 'none' }));
+      if (delivery.mode === 'panel_account') delivery.account = { ...(delivery.account ?? {}), traffic_limit_bytes: Math.round(gb * BYTES_PER_GB) };
+      lines.push({
+        product_id: product.id, name: `${product.name} — ${gb} Go`, unit_price: round2(product.price * gb), quantity: g.qty, gb,
+        snapshot: { delivery, renewal_enabled: !!product.renewal_enabled },
+      });
+    }
+
+    const total = parseFloat(lines.reduce((sum, l) => sum + l.unit_price * l.quantity, 0).toFixed(2));
     if (total <= 0) throw new BadRequestException('Montant de commande invalide');
 
     if (needsPanelDelivery && !this.panel.isConfigured()) {
@@ -429,6 +481,49 @@ export class OrdersService implements OnModuleInit {
     }
   }
 
+  private shortId(id: string) {
+    return `#${id.slice(0, 8).toUpperCase()}`;
+  }
+
+  private itemsText(lines: OrderItem[]) {
+    return lines.map((l) => `${l.quantity} × ${l.name}`).join(', ').slice(0, 400);
+  }
+
+  /** Nombre de commandes boutique déjà payées du client (condition « première commande » des codes promo). */
+  private paidOrderCount(userId: string): number {
+    return this.store.orders.filter((o) => o.user_id === userId && o.kind !== 'topup' && PAID_STATES.includes(o.status)).length;
+  }
+
+  /** Contrôle un code promo « réduction » sur un panier (rien n'est consommé). */
+  async quote(
+    user: { id: string; email: string },
+    items: OrderItemDto[],
+    method: PaymentMethod,
+    code?: string,
+  ): Promise<{ subtotal: number; discount: number; total: number; currency: string; promo?: { valid: boolean; reason?: string; code?: string; label?: string } }> {
+    const { lines, total: subtotal, currency } = this.resolveLines(items);
+    if (!code?.trim()) return { subtotal, discount: 0, total: subtotal, currency };
+    const r = await this.promo.validate({
+      code, user_id: user.id, user_email: user.email, context: 'shop', payment_method: method,
+      items: lines.map((l) => ({ product_id: l.product_id, unit_price: l.unit_price, quantity: l.quantity })),
+      user_order_count: this.paidOrderCount(user.id),
+    });
+    if (!r.valid) return { subtotal, discount: 0, total: subtotal, currency, promo: { valid: false, reason: r.reason } };
+    const discount = Math.min(round2(r.effect ?? 0), subtotal);
+    return { subtotal, discount, total: round2(subtotal - discount), currency, promo: { valid: true, code: r.code, label: r.label } };
+  }
+
+  /** Consomme (réserve) un code promo pour cette commande ; lève une erreur lisible si refusé. */
+  private async applyPromo(user: { id: string; email: string }, code: string, lines: OrderItem[], method: PaymentMethod, ref: string): Promise<PromoResult> {
+    const r = await this.promo.consume({
+      code, user_id: user.id, user_email: user.email, context: 'shop', payment_method: method, ref,
+      items: lines.map((l) => ({ product_id: l.product_id, unit_price: l.unit_price, quantity: l.quantity })),
+      user_order_count: this.paidOrderCount(user.id),
+    });
+    if (!r.valid) throw new BadRequestException(`PROMO_${(r.reason ?? 'unknown').toUpperCase()}`);
+    return r;
+  }
+
   /**
    * Point d'entrée unique du checkout : 4 méthodes de paiement.
    *  - 'wallet' : débit synchrone ; livraison immédiate (commande 'paid') ou, si un produit exige une validation manuelle,
@@ -436,6 +531,7 @@ export class OrdersService implements OnModuleInit {
    *  - 'stripe' / 'nowpayments' / 'paypal' : commande 'pending' (stock réservé, jamais débitée ni livrée) ; la confirmation
    *    arrive par webhook / IPN (confirmExternalPayment) qui livre, ou met en 'review'.
    * `renew` : le client active le renouvellement automatique des produits qui le proposent.
+   * `promoCode` : réduction (addon Codes promo), contrôlée et consommée côté serveur ; libérée si la commande échoue / est annulée.
    */
   async checkout(
     user: { id: string; email: string },
@@ -444,9 +540,9 @@ export class OrdersService implements OnModuleInit {
     successUrl?: string,
     cancelUrl?: string,
     renew = false,
+    promoCode?: string,
   ): Promise<{ order: OrderRecord; checkoutUrl?: string }> {
-    const { lines, total, currency, needsApproval } = this.resolveLines(items);
-    const note = `Commande : ${lines.map((l) => `${l.quantity}× ${l.name}`).join(', ')}`.slice(0, 180);
+    const { lines, total: subtotal, currency, needsApproval } = this.resolveLines(items);
 
     if (method === 'stripe' || method === 'nowpayments') {
       if (!successUrl || !cancelUrl) throw new BadRequestException('successUrl/cancelUrl requis pour ce mode de paiement');
@@ -468,31 +564,68 @@ export class OrdersService implements OnModuleInit {
     // Le stock est (re)contrôlé ET réservé sans point d'attente entre les deux.
     for (const l of lines) {
       const p = this.store.products[l.product_id];
-      if (!p || !p.active || (p.stock !== null && p.stock < l.quantity)) {
+      const sameProduct = lines.filter((x) => x.product_id === l.product_id).reduce((n, x) => n + x.quantity, 0);
+      if (!p || !p.active || (p.stock !== null && p.stock < sameProduct)) {
         throw new BadRequestException(`Stock insuffisant : ${l.name}`);
       }
     }
     this.reserveStock(lines);
 
-    if (method === 'wallet') {
+    const orderId = randomUUID();
+    let total = subtotal;
+    let promo: OrderRecord['promo'];
+    if (promoCode?.trim()) {
       try {
-        await this.wallet.debit(user.id, total, note);
+        const r = await this.applyPromo(user, promoCode, lines, method, `order:${orderId}`);
+        const amount = Math.min(round2(r.effect ?? 0), subtotal);
+        promo = { code: r.code ?? promoCode.trim().toUpperCase(), amount, ref: `order:${orderId}` };
+        total = round2(subtotal - amount);
+        if (total <= 0 && method !== 'wallet') throw new BadRequestException('PROMO_TOTAL_ZERO');
       } catch (err) {
         this.releaseStock(lines);
+        if (promo) await this.promo.release(promo.ref);
         throw err;
       }
+    }
 
-      const order = this.buildOrder(user, lines, total, currency, note, 'wallet', needsApproval ? 'review' : 'paid', [], renew);
+    try {
+      return await this.checkoutPaid(user, lines, subtotal, total, currency, needsApproval, method, renew, orderId, promo, paypalReceiver, successUrl, cancelUrl);
+    } catch (err) {
+      if (promo) await this.promo.release(promo.ref);
+      throw err;
+    }
+  }
+
+  private async checkoutPaid(
+    user: { id: string; email: string }, lines: OrderItem[], subtotal: number, total: number, currency: string, needsApproval: boolean,
+    method: PaymentMethod, renew: boolean, orderId: string, promo: OrderRecord['promo'], paypalReceiver: string, successUrl?: string, cancelUrl?: string,
+  ): Promise<{ order: OrderRecord; checkoutUrl?: string }> {
+    const note = `Commande : ${lines.map((l) => `${l.quantity}× ${l.name}`).join(', ')}`.slice(0, 180);
+    const extra: Partial<OrderRecord> = { id: orderId, ...(promo ? { subtotal, promo } : {}) };
+
+    if (method === 'wallet') {
+      if (total > 0) {
+        try {
+          await this.wallet.debit(user.id, total, note);
+        } catch (err) {
+          this.releaseStock(lines);
+          throw err;
+        }
+      }
+
+      const order = this.buildOrder(user, lines, total, currency, note, 'wallet', needsApproval ? 'review' : 'paid', [], renew, extra);
       if (!needsApproval) {
         try {
           order.deliveries = await this.deliver(order);
         } catch (err: any) {
           this.releaseStock(lines);
           this.logger.error(`Livraison échouée — remboursement de ${total} ${currency}: ${err?.message}`);
-          try {
-            await this.wallet.credit(user.id, total, `Remboursement (échec livraison) — ${note}`);
-          } catch (refundErr: any) {
-            this.logger.error(`ÉCHEC du remboursement après livraison ratée: ${refundErr?.message}`);
+          if (total > 0) {
+            try {
+              await this.wallet.credit(user.id, total, `Remboursement (échec livraison) — ${note}`);
+            } catch (refundErr: any) {
+              this.logger.error(`ÉCHEC du remboursement après livraison ratée: ${refundErr?.message}`);
+            }
           }
           throw new ServiceUnavailableException(
             `Paiement remboursé : la livraison a échoué (${err?.message ?? 'erreur inconnue'})`,
@@ -501,11 +634,12 @@ export class OrdersService implements OnModuleInit {
       }
       this.recordPayment(order, 'initial', 'wallet', total, note);
       this.store.addOrder(order);
+      this.notifyPaid(order);
       return { order };
     }
 
     // Paiement externe : commande 'pending', pas de débit, pas de livraison (webhook / IPN).
-    const order = this.buildOrder(user, lines, total, currency, note, method, 'pending', [], renew);
+    const order = this.buildOrder(user, lines, total, currency, note, method, 'pending', [], renew, extra);
     try {
       if (method === 'paypal') {
         let ref = this.payments.newPaypalReference();
@@ -526,16 +660,87 @@ export class OrdersService implements OnModuleInit {
     }
   }
 
+  // ─── Recharge du solde (appelée par l'addon Wallet) ──────────────────────────
+
+  /**
+   * Crée une commande « recharge » payée par une passerelle externe (jamais par le solde lui-même). Le Wallet a déjà contrôlé
+   * le montant (bornes, offres) et calculé le crédit de base (montant + bonus de palier) ; le bonus d'un code promo est
+   * (re)contrôlé et consommé ICI. Le crédit n'est versé qu'à la confirmation du paiement.
+   */
+  async createTopup(dto: TopupDto): Promise<{ order: OrderRecord; checkoutUrl?: string }> {
+    const method = dto.paymentMethod as PaymentMethod;
+    const amount = round2(dto.amount);
+    const baseCredit = round2(dto.base_credit);
+    if (baseCredit < amount) throw new BadRequestException('Crédit incohérent');
+    const currency = (dto.currency || 'EUR').toUpperCase();
+    if (!(await this.wallet.isAvailable())) throw new ServiceUnavailableException('Addon Wallet requis pour une recharge');
+
+    if (method === 'stripe' || method === 'nowpayments') {
+      if (!dto.successUrl || !dto.cancelUrl) throw new BadRequestException('successUrl/cancelUrl requis pour ce mode de paiement');
+      for (const u of [dto.successUrl, dto.cancelUrl]) {
+        let parsed: URL;
+        try { parsed = new URL(u); } catch { throw new BadRequestException('URL de retour invalide'); }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new BadRequestException('URL de retour invalide');
+      }
+    }
+    const paypalReceiver = method === 'paypal' ? this.payments.paypalReceiver() : '';
+
+    const orderId = randomUUID();
+    const user = { id: dto.user_id, email: dto.user_email ?? '' };
+    let credit = baseCredit;
+    let promo: OrderRecord['promo'];
+    if (dto.promo_code?.trim()) {
+      const r = await this.promo.consume({ code: dto.promo_code, user_id: user.id, user_email: user.email, context: 'topup', amount, payment_method: method, ref: `order:${orderId}` });
+      if (!r.valid) throw new BadRequestException(`PROMO_${(r.reason ?? 'unknown').toUpperCase()}`);
+      promo = { code: r.code ?? dto.promo_code.trim().toUpperCase(), amount: round2(r.effect ?? 0), ref: `order:${orderId}` };
+      credit = round2(baseCredit + promo.amount);
+    }
+
+    const note = 'Recharge du solde';
+    const line: OrderItem = { product_id: '__topup__', name: note, unit_price: amount, quantity: 1 };
+    const order = this.buildOrder(user, [line], amount, currency, note, method, 'pending', [], false, {
+      id: orderId, kind: 'topup', stock_reserved: false, ...(promo ? { promo } : {}),
+      topup: { paid: amount, credit, base_credit: baseCredit, bonus: round2(credit - amount) },
+    });
+    try {
+      if (method === 'paypal') {
+        let ref = this.payments.newPaypalReference();
+        while (this.store.orders.some((o) => o.paypal?.note === ref)) ref = this.payments.newPaypalReference();
+        order.paypal = { email: paypalReceiver, note: ref };
+        order.payment_ref = ref;
+        this.store.addOrder(order);
+        return { order };
+      }
+      const checkoutUrl = method === 'stripe'
+        ? await this.payments.createStripeCheckout(order, dto.successUrl!, dto.cancelUrl!)
+        : await this.payments.createNowPayment(order, dto.successUrl!, dto.cancelUrl!);
+      this.store.addOrder(order);
+      return { order, checkoutUrl };
+    } catch (err) {
+      if (promo) await this.promo.release(promo.ref);
+      throw err;
+    }
+  }
+
   private buildOrder(
     user: { id: string; email: string }, lines: OrderItem[], total: number, currency: string, note: string,
-    method: PaymentMethod, status: OrderStatus, deliveries: DeliveredAccount[], renew: boolean,
+    method: PaymentMethod, status: OrderStatus, deliveries: DeliveredAccount[], renew: boolean, extra: Partial<OrderRecord> = {},
   ): OrderRecord {
     const now = new Date().toISOString();
     return {
       id: randomUUID(), user_id: user.id, user_email: user.email || undefined, stock_reserved: true,
       items: lines, total, currency, status, note, renew,
-      payment_method: method, deliveries, created_at: now, updated_at: now,
+      payment_method: method, deliveries, created_at: now, updated_at: now, ...extra,
     };
+  }
+
+  // ─── E-mails (modèles gérés dans le panel : Paramètres → SMTP & e-mails) ─────
+
+  /** Commande payée : au client (confirmation ou « en cours de validation »), et aux administrateurs. */
+  private notifyPaid(order: OrderRecord): void {
+    const vars = { orderId: this.shortId(order.id), items: this.itemsText(order.items), total: money(order.total, order.currency) };
+    this.mail.send(order.status === 'review' ? 'orders.order-review' : 'orders.order-paid', order.user_email, vars);
+    this.mail.send('orders.admin-new', 'admins', { ...vars, customer: order.user_email ?? order.user_id, status: order.status === 'review' ? 'à valider' : 'payée' });
   }
 
   /** Enregistre un encaissement et lui attribue un numéro de facture si la facturation est activée. */
@@ -563,6 +768,7 @@ export class OrdersService implements OnModuleInit {
     if (this.delivering.has(order.id)) return order; // un autre événement la traite en ce moment
     this.delivering.add(order.id);
     try {
+      if (order.kind === 'topup') return await this.fulfilTopup(order);
       const needsApproval = this.orderNeedsApproval(order);
       if (!needsApproval) {
         try {
@@ -581,10 +787,34 @@ export class OrdersService implements OnModuleInit {
       this.recordPayment(order, 'initial', order.payment_method, order.total, order.note ?? '');
       order.updated_at = new Date().toISOString();
       this.store.setOrder(order);
+      this.notifyPaid(order);
       return order;
     } finally {
       this.delivering.delete(order.id);
     }
+  }
+
+  /** Recharge payée : le crédit (montant + bonus) est versé au Wallet, la commande est terminée. Idempotent (statut 'pending' requis). */
+  private async fulfilTopup(order: OrderRecord): Promise<OrderRecord> {
+    const credit = order.topup?.credit ?? order.total;
+    let balance = 0;
+    try {
+      balance = await this.wallet.credit(order.user_id, credit, `Recharge du solde ${this.shortId(order.id)}`);
+    } catch (err: any) {
+      this.logger.error(`Crédit Wallet impossible après paiement de la recharge ${order.id} : ${err?.message}`);
+      throw err; // reste 'pending' : la passerelle renverra la confirmation
+    }
+    order.status = 'fulfilled';
+    this.recordPayment(order, 'initial', order.payment_method, order.total, order.note ?? 'Recharge du solde');
+    order.updated_at = new Date().toISOString();
+    this.store.setOrder(order);
+    const bonus = order.topup?.bonus ?? 0;
+    this.mail.send('wallet.topup-done', order.user_email, {
+      amount: money(credit, order.currency),
+      bonus: bonus > 0 ? ` (dont ${money(bonus, order.currency)} de bonus)` : '',
+      balance: money(balance, order.currency),
+    });
+    return order;
   }
 
   private orderNeedsApproval(order: OrderRecord): boolean {
@@ -603,6 +833,7 @@ export class OrdersService implements OnModuleInit {
     order.status = 'cancelled';
     order.updated_at = new Date().toISOString();
     this.store.setOrder(order);
+    if (order.promo) void this.promo.release(order.promo.ref);
   }
 
   findByPaymentRef(ref: string): OrderRecord | undefined {
@@ -627,6 +858,7 @@ export class OrdersService implements OnModuleInit {
       o.status = 'cancelled';
       o.updated_at = new Date().toISOString();
       this.store.setOrder(o);
+      if (o.promo) void this.promo.release(o.promo.ref);
       this.logger.log(`Commande PayPal ${o.id} annulée (non payée après ${hours} h).`);
     }
   }
@@ -799,6 +1031,7 @@ export class OrdersService implements OnModuleInit {
       order.approved_at = new Date().toISOString();
       order.updated_at = order.approved_at;
       this.store.setOrder(order);
+      this.mail.send('orders.order-approved', order.user_email, { orderId: this.shortId(order.id), items: this.itemsText(order.items) });
       return order;
     } finally {
       this.delivering.delete(order.id);
@@ -849,7 +1082,17 @@ export class OrdersService implements OnModuleInit {
 
   private async renewOne(order: OrderRecord, d: DeliveredAccount): Promise<boolean> {
     const r = d.renewal!;
-    const fail = (code: string) => { r.failed_at = new Date().toISOString(); r.last_error = code; return true; };
+    const fail = (code: string) => {
+      // Un seul e-mail d'échec par jour et par compte (la nouvelle tentative a lieu à chaque passage).
+      const last = r.failed_at ? Date.parse(r.failed_at) : 0;
+      if (!last || Date.now() - last > DAY_MS) {
+        const reasons: Record<string, string> = { insufficient: 'solde insuffisant', wallet_down: 'portefeuille momentanément indisponible', panel: 'erreur technique côté panel' };
+        this.mail.send('orders.renewal-failed', order.user_email, { product: r.product_name, reason: reasons[code] ?? code });
+      }
+      r.failed_at = new Date().toISOString();
+      r.last_error = code;
+      return true;
+    };
     if (!(await this.wallet.isAvailable())) return fail('wallet_down');
 
     try {
@@ -888,6 +1131,7 @@ export class OrdersService implements OnModuleInit {
     r.failed_at = undefined;
     r.last_error = undefined;
     this.recordPayment(order, 'renewal', 'wallet', r.unit_price, r.product_name);
+    this.mail.send('orders.renewal-done', order.user_email, { product: r.product_name, amount: money(r.unit_price, r.currency), expiresAt: new Date(d.expires_at!).toLocaleDateString('fr-FR') });
     this.logger.log(`Compte ${d.username} renouvelé (${r.unit_price} ${r.currency}) jusqu'au ${d.expires_at}.`);
     return true;
   }
@@ -911,6 +1155,9 @@ export class OrdersService implements OnModuleInit {
     let manualRefundRequired = false;
     if (status === 'cancelled') {
       const wasPaid = PAID_STATES.includes(order.status);
+      if (order.kind === 'topup' && wasPaid) {
+        throw new BadRequestException('Une recharge déjà créditée ne peut pas être annulée : ajustez le solde dans la gestion du Wallet.');
+      }
 
       if (wasPaid && order.payment_method === 'wallet') {
         // Rembourser AVANT de modifier quoi que ce soit : en cas d'échec, la commande reste intacte.
@@ -944,9 +1191,19 @@ export class OrdersService implements OnModuleInit {
       }
     }
 
+    const wasPaidBefore = PAID_STATES.includes(order.status);
     order.status = status;
     order.updated_at = new Date().toISOString();
     this.store.setOrder(order);
+    if (status === 'cancelled') {
+      if (order.promo) void this.promo.release(order.promo.ref);
+      if (order.kind !== 'topup') {
+        this.mail.send('orders.order-cancelled', order.user_email, {
+          orderId: this.shortId(order.id),
+          refund: wasPaidBefore ? (order.payment_method === 'wallet' ? 'Le montant a été recrédité sur votre solde.' : 'Contactez le support pour votre remboursement.') : 'Aucun paiement n’a été débité.',
+        });
+      }
+    }
     return { order, manualRefundRequired };
   }
 

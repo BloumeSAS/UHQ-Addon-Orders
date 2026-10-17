@@ -43,6 +43,10 @@ export interface ProductRecord {
   delivery: DeliveryConfig;
   /** Les comptes livrés peuvent être renouvelés automatiquement (solde Wallet) quand le client l'active. */
   renewal_enabled?: boolean;
+  /** 'per_gb' : `price` = prix d'UN Go et le client choisit la quantité de Go (bornes ci-dessous). Défaut : prix fixe. */
+  pricing?: 'fixed' | 'per_gb';
+  /** Vente au Go : minimum / maximum de Go (max 0 = pas de plafond) et pas de la sélection. */
+  per_gb?: { min_gb: number; max_gb: number; step_gb: number };
   created_at: string;
   updated_at: string;
 }
@@ -52,6 +56,8 @@ export interface OrderItem {
   name: string;
   unit_price: number;
   quantity: number;
+  /** Vente au Go : quantité de Go choisie (le prix de la ligne est déjà `unit_price` = prix du Go × Go). */
+  gb?: number;
   /** Livraison + option de renouvellement FIGÉES à la commande (la livraison validée plus tard / les renouvellements les utilisent). */
   snapshot?: { delivery: DeliveryConfig; renewal_enabled: boolean };
 }
@@ -130,6 +136,14 @@ export interface OrderRecord {
   /** Le client a demandé le renouvellement automatique à la commande. */
   renew?: boolean;
   paypal?: PaypalInfo;
+  /** 'topup' = recharge du solde Wallet payée par une passerelle externe (aucune livraison de compte). */
+  kind?: 'shop' | 'topup';
+  /** Total avant code promo (absent si aucun code). */
+  subtotal?: number;
+  /** Code promo appliqué : montant déduit et référence d'utilisation côté addon Codes promo. */
+  promo?: { code: string; amount: number; ref: string };
+  /** Recharge : montant payé, crédit final versé au Wallet, dont bonus (offre + code promo). */
+  topup?: { paid: number; credit: number; base_credit: number; bonus: number };
   /** Alerte : PayPal a signalé un remboursement / une contestation de ce paiement (à vérifier par l'admin). */
   payment_alert?: string;
   approved_by?: string;

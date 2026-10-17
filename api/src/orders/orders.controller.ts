@@ -7,8 +7,9 @@ import { PaymentsService } from './payments/payments.service';
 import { PanelAuthService } from './panel-auth.service';
 import { InvoiceService } from './invoice/invoice.service';
 import { StoreService } from './store.service';
+import { PromoClient } from './promo.client';
 import {
-  CreateProductDto, UpdateProductDto, PlaceOrderDto, OrderStatusDto, UpdatePaymentSettingsDto, RenewDto, BillingProfileDto,
+  CreateProductDto, UpdateProductDto, PlaceOrderDto, OrderStatusDto, UpdatePaymentSettingsDto, RenewDto, BillingProfileDto, QuoteDto, TopupDto,
 } from './dto/orders.dto';
 
 @Controller('api')
@@ -19,6 +20,7 @@ export class OrdersController {
     private readonly auth: PanelAuthService,
     private readonly invoices: InvoiceService,
     private readonly store: StoreService,
+    private readonly promo: PromoClient,
   ) {}
 
   // ─── Wallet status ───────────────────────────────────────────────────────────
@@ -126,7 +128,7 @@ export class OrdersController {
   async placeOrder(@Req() req: Request, @Body() dto: PlaceOrderDto) {
     const user = await this.auth.authenticate(req);
     const { order, checkoutUrl } = await this.orders.checkout(
-      { id: user.id, email: user.email }, dto.items, dto.paymentMethod ?? 'wallet', dto.successUrl, dto.cancelUrl, dto.renew === true,
+      { id: user.id, email: user.email }, dto.items, dto.paymentMethod ?? 'wallet', dto.successUrl, dto.cancelUrl, dto.renew === true, dto.promo_code,
     );
     return { success: true, order, checkoutUrl };
   }
@@ -137,6 +139,35 @@ export class OrdersController {
     const admin = await this.auth.requireAdmin(req);
     const { order, manualRefundRequired } = await this.orders.updateStatus(id, dto.status, admin.email || admin.id);
     return { success: true, order, manualRefundRequired };
+  }
+
+  /** POST /api/promo/quote — total d'un panier avec un code promo (rien n'est créé ni consommé). */
+  @Post('promo/quote')
+  @HttpCode(200)
+  async promoQuote(@Req() req: Request, @Body() dto: QuoteDto) {
+    const user = await this.auth.authenticate(req);
+    return this.orders.quote({ id: user.id, email: user.email }, dto.items, dto.paymentMethod ?? 'wallet', dto.promo_code);
+  }
+
+  /**
+   * POST /api/internal/topup — crée une recharge du solde payée par une passerelle (appelée par l'addon Wallet, X-Panel-Key).
+   * Le navigateur ne l'appelle jamais directement : le Wallet a déjà contrôlé le montant et calculé le crédit.
+   */
+  @Post('internal/topup')
+  @HttpCode(200)
+  async internalTopup(@Headers('x-panel-key') key: string | undefined, @Body() dto: TopupDto) {
+    this.auth.requirePanelKey(key);
+    const { order, checkoutUrl } = await this.orders.createTopup(dto);
+    return { order_id: order.id, checkoutUrl, paypal: order.paypal, total: order.total, credit: order.topup?.credit, bonus: order.topup?.bonus };
+  }
+
+  /** GET /api/internal/topup/:id?user_id= — état d'une recharge (pour le suivi côté Wallet). */
+  @Get('internal/topup/:id')
+  internalTopupStatus(@Headers('x-panel-key') key: string | undefined, @Param('id') id: string, @Query('user_id') userId?: string) {
+    this.auth.requirePanelKey(key);
+    const o = this.orders.findById(id);
+    if (!o || o.kind !== 'topup' || (userId && o.user_id !== userId)) throw new NotFoundException('Recharge introuvable');
+    return { order_id: o.id, status: o.status, total: o.total, credit: o.topup?.credit, bonus: o.topup?.bonus, paypal: o.paypal, created_at: o.created_at };
   }
 
   /** POST /api/orders/:id/approve — valide une commande « à valider » : les comptes sont créés puis livrés (ADMIN). */
@@ -246,7 +277,7 @@ export class OrdersController {
   @Get('payments/methods')
   async paymentMethods(@Req() req: Request) {
     await this.auth.authenticate(req);
-    return this.payments.availableMethods();
+    return { ...(await this.payments.availableMethods()), promo: await this.promo.isAvailable() };
   }
 
   /** GET /api/payments/settings — réglages passerelles (secrets masqués, ADMIN). */

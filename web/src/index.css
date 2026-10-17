@@ -274,3 +274,6 @@ textarea.input { resize: vertical; min-height: 4.5rem; }
 .spec-list li span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .steps { padding-left: 1.2rem; display: grid; gap: 0.25rem; font-size: 0.85rem; color: var(--fg2); }
 .text-red { color: var(--red, #dc2626); }
+
+/* Vente au Go */
+.gb-picker { padding: 0.6rem 0.7rem; border: 1px dashed var(--border); border-radius: 0.65rem; background: var(--bg2); }
