@@ -58,6 +58,20 @@ export class OrdersController {
     return { products: isAdmin ? list : list.map((p) => this.orders.toPublic(p)) };
   }
 
+  /**
+   * GET /api/internal/catalog — catalogue PUBLIC pour la vitrine (addon Vitrine, X-Panel-Key). Produits actifs et en stock,
+   * sans configuration de livraison (jamais de listes de proxies privés) ; `category` = catégorie du panel livrée par le produit.
+   */
+  @Get('internal/catalog')
+  internalCatalog(@Headers('x-panel-key') key: string | undefined) {
+    this.auth.requirePanelKey(key);
+    const products = this.orders
+      .listProducts(false)
+      .filter((p) => p.stock === null || p.stock > 0)
+      .map((p) => ({ ...this.orders.toPublic(p), category: p.delivery?.mode === 'panel_account' ? p.delivery.account?.pool ?? '' : '' }));
+    return { products };
+  }
+
   /** POST /api/products — créer un produit (ADMIN) */
   @Post('products')
   @HttpCode(200)
