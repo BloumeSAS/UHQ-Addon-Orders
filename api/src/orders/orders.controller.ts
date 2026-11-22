@@ -72,6 +72,17 @@ export class OrdersController {
     return { products };
   }
 
+  /**
+   * GET /api/internal/orders-feed — flux de commandes pour l'addon Parrainage (lecture seule, X-Panel-Key) : uniquement les champs
+   * utiles au calcul d'une commission (jamais de livraison ni de coordonnées de paiement). `since` = ISO ; renvoie les commandes
+   * modifiées depuis cette date, plus anciennes d'abord.
+   */
+  @Get('internal/orders-feed')
+  internalOrdersFeed(@Headers('x-panel-key') key: string | undefined, @Query('since') since?: string) {
+    this.auth.requirePanelKey(key);
+    return { orders: this.orders.ordersFeed(since) };
+  }
+
   /** POST /api/products — créer un produit (ADMIN) */
   @Post('products')
   @HttpCode(200)

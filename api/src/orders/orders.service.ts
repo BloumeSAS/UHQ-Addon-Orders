@@ -1011,6 +1011,20 @@ export class OrdersService implements OnModuleInit {
     return out;
   }
 
+  /** Commandes modifiées depuis `since` (champs minimaux : montant, statut, client) — alimente l'addon Parrainage. */
+  ordersFeed(since?: string): { id: string; user_id: string; user_email: string; kind: string; total: number; currency: string; status: string; payment_method: string; created_at: string; updated_at: string }[] {
+    const t = since ? Date.parse(since) : 0;
+    const from = Number.isFinite(t) ? t : 0;
+    return this.store.orders
+      .filter((o) => Date.parse(o.updated_at) >= from)
+      .sort((a, b) => Date.parse(a.updated_at) - Date.parse(b.updated_at))
+      .slice(0, 2000)
+      .map((o) => ({
+        id: o.id, user_id: o.user_id, user_email: o.user_email ?? '', kind: o.kind ?? 'shop', total: o.total, currency: o.currency,
+        status: o.status, payment_method: o.payment_method, created_at: o.created_at, updated_at: o.updated_at,
+      }));
+  }
+
   // ─── Validation manuelle ─────────────────────────────────────────────────────
 
   /** Un admin valide une commande 'review' : les comptes sont créés puis la commande passe 'paid'. */
