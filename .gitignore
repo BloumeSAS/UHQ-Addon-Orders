@@ -18,3 +18,10 @@ api/orders-data.json
 # OS files
 .DS_Store
 Thumbs.db
+
+# Harmonisé avec les autres addons officiels (dépendances, builds, données locales, pièces jointes, secrets)
+dist/
+*.log
+*-data.json*
+data/
+out/
