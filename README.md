@@ -1,151 +1,87 @@
-# UHQ Orders Addon
+<div align="center">
 
-> **Addon officiel pour [UHQ Panel OS](https://github.com/BloumeSAS/UHQ-Panel-OS)** — by [Bloume SAS](https://bloume.fr)
->
-> Boutique interne : l'admin gère un catalogue de produits, les utilisateurs passent commande et **paient avec leur solde** géré par l'addon [Wallet](https://github.com/BloumeSAS/UHQ-Addon-Wallet).
+# 🛒 UHQ Orders Add-on
 
-NestJS + React, une seule image Docker, persistance JSON — exactement la même architecture que l'addon Wallet.
+**A built-in shop: sell proxy accounts and have them delivered automatically.**
 
----
+Official free add-on for [UHQ Panel OS](https://github.com/BloumeSAS/UHQ-Panel-OS) — by [Bloume SAS](https://bloume.fr)
 
-## ⚠️ Dépendance : l'addon Wallet
+[![Release](https://img.shields.io/github/v/release/BloumeSAS/UHQ-Addon-Orders?color=f97316)](https://github.com/BloumeSAS/UHQ-Addon-Orders/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-online-0ea5e9)](https://uhq-panel-os-docs.bloume.fr/addons/official/orders)
+[![Video](https://img.shields.io/badge/video-YouTube-red?logo=youtube)](https://youtu.be/YRiaL9PhQ5o)
 
-Orders **ne stocke aucun solde**. Il délègue toute la gestion du solde à l'addon **Wallet** :
+🇬🇧 English · [🇫🇷 Français](README.fr.md)
 
-- la lecture du solde et le **débit à la commande** passent par l'API du Wallet ;
-- à l'annulation d'une commande payée, le montant est **remboursé** automatiquement.
-
-L'addon Wallet doit donc être **installé, déployé et joignable**. Tant qu'il ne l'est pas, la boutique affiche un avertissement et le paiement est désactivé.
-
-> 🔑 **Aucun token admin requis.** Les deux addons s'authentifient mutuellement via `PANEL_API_KEY` — la même clé déjà utilisée pour le système de backup. Pas de JWT à récupérer, pas d'expiration à gérer.
+</div>
 
 ---
 
-## Fonctionnalités
+## Features
 
-- 🛍️ Catalogue de produits (CRUD admin : nom, description, prix, stock, actif/inactif)
-- 💳 Paiement avec le solde Wallet (débit automatique au paiement)
-- 📦 Gestion du stock (décrémenté à la commande, illimité si non renseigné)
-- 🧾 Suivi des commandes (payée / honorée / annulée) — l'annulation rembourse le solde
-- 📊 Widget KPIs sur le Dashboard (commandes, chiffre d'affaires, produits actifs)
-- 🛒 Raccourci « Boutique » dans le dropdown topbar
-- 💾 Backup automatique inclus (produits + commandes)
-- 🌍 Français et anglais
+- Product catalogue with stock, fixed price or pay-per-GB
+- Payment by Wallet balance, card (Stripe), crypto (NOWPayments) or PayPal
+- Automatic delivery of proxy accounts, optional admin approval
+- Automatic renewal from the Wallet balance
+- Promo codes, PDF invoices and receipts
+- Read-only order feed for the Referral add-on
 
----
+▶️ **Video — install, test and tour:** https://youtu.be/YRiaL9PhQ5o
 
-## Installation (local)
+## Requirements
+
+- UHQ Panel OS (latest version recommended)
+- Wallet add-on
+
+## Installation
+
+### Bundled (recommended)
+
+The add-on is already included in the UHQ Panel OS image. In the panel, open **Extensions**, find **Orders** and click **Enable**. Nothing else to configure: the panel starts it as an internal process and serves it under `/addon-proxy/orders/`.
+
+### Standalone (Docker)
 
 ```bash
-git clone https://github.com/BloumeSAS/UHQ-Addon-Orders
-cd UHQ-Addon-Orders
+docker run -d --name uhq-addon-orders -p 3102:3102 \
+  -e PANEL_URL=https://panel.example.com \
+  -e PANEL_API_KEY=your-panel-api-key \
+  -v uhq-addon-orders:/app/data \
+  ghcr.io/bloumesas/uhq-addon-orders:latest
+```
+
+Then add its URL in **Extensions → Add an add-on**.
+
+## Configuration
+
+| Variable | Description |
+|---|---|
+| `PORT` | Listening port (default `3102`) |
+| `PANEL_URL` | Panel URL (token verification, panel API) |
+| `PANEL_API_KEY` | Panel API key (Settings → API key): backups, e-mails, add-on to add-on calls |
+| `DB_PATH` | Data file (JSON) |
+| `WALLET_URL` | Wallet add-on URL |
+| `PROMO_URL` | Promo Codes add-on URL |
+| `NODE_ENV` | `production` or `development` |
+
+## Security
+
+Every request is verified by the panel (`/api/panel/security/me`): roles are never read from the token alone. Add-on to add-on calls and backups require the panel API key (`X-Panel-Key`, constant-time comparison). Report vulnerabilities privately — see the [UHQ Panel OS security policy](https://github.com/BloumeSAS/UHQ-Panel-OS/blob/main/SECURITY.md).
+
+## Development
+
+```bash
 npm run install:all
-cp .env.example .env   # renseigner WALLET_URL (et PANEL_API_KEY si protection backup souhaitée)
-npm run build && npm start
+cd api && npm run start:dev   # API :3102
+cd web && npm run dev         # Vite dev server
+npm run build                 # web + api
 ```
 
-Connecter dans le panel : **Extensions → `http://localhost:3002`**.
+When bundled in the panel image, the web app is built with `--base="/addon-proxy/orders/"`.
 
-Pour le hot-reload en développement :
+## Documentation
 
-```bash
-cd api && npm run start:dev   # NestJS :3002
-cd web && npm run dev          # Vite   :5175
-```
+https://uhq-panel-os-docs.bloume.fr/addons/official/orders
 
----
+## License
 
-## Intégration Wallet — zero-config
-
-| Variable | Obligatoire | Description |
-|---|---|---|
-| `WALLET_URL` | ✅ | URL de base de l'addon Wallet (ex. `https://wallet.domaine.com` ou `http://wallet:3001` en compose) |
-| `PANEL_API_KEY` | Recommandé | Clé API du panel — protège aussi le backup. Déjà définie si vous utilisez les deux addons en production. |
-
-**C'est tout.** Pas de `WALLET_SERVICE_TOKEN`. Les communications inter-addons sont sécurisées via `PANEL_API_KEY`, le même header `X-Panel-Key` que le système de backup. Si `PANEL_API_KEY` n'est pas définie (dev local), les appels sont autorisés sans authentification (comportement identique au backup).
-
-### Comment ça marche
-
-```
-[Orders]  POST /api/wallet/internal/add
-          Header: X-Panel-Key: <PANEL_API_KEY>
-          ──────────────────────────────────►  [Wallet]
-                                               Vérifie X-Panel-Key === PANEL_API_KEY
-                                               Débite / crédite le wallet
-```
-
-Le Wallet expose `/api/wallet/internal/add` **uniquement** pour les appels inter-addons. Cet endpoint n'est pas documenté dans l'API publique du Wallet et n'est pas accessible sans la clé.
-
----
-
-## Docker (Coolify)
-
-1. Nouveau service Docker Compose → coller `docker-compose.coolify.yml`
-2. Variables : `PANEL_URL`, `PANEL_API_KEY`, `WALLET_URL`, `DOMAIN`
-3. Volume : `orders_data` → `/app/data`
-4. Connecter dans le panel : `https://orders.domaine.com`
-
----
-
-## Zones injectées
-
-| Zone | Type | Description |
-|---|---|---|
-| `topbar` | Slot | « Boutique » dans le dropdown |
-| `/admin` | Page admin | « Gestion boutique » (adminOnly) — produits + commandes |
-| `/` | Page | Boutique utilisateur (catalogue + mes commandes) |
-| `/` | Widget 100px | 3 KPIs : commandes, CA, produits actifs |
-
----
-
-## API
-
-Authentification : `Authorization: Bearer <jwt-panel>` (passé par le panel).
-
-| Méthode | Endpoint | Accès | Description |
-|---|---|---|---|
-| `GET`    | `/api/products`               | user  | Catalogue actif (`?all=true` admin → inclut inactifs) |
-| `POST`   | `/api/products`               | admin | Créer un produit |
-| `PATCH`  | `/api/products/:id`           | admin | Modifier un produit |
-| `DELETE` | `/api/products/:id`           | admin | Supprimer un produit |
-| `GET`    | `/api/orders`                 | user  | Mes commandes (`?all=true` admin → toutes) |
-| `POST`   | `/api/orders`                 | user  | Passer commande `{ items: [{ product_id, quantity }] }` |
-| `PATCH`  | `/api/orders/:id/status`      | admin | `paid` \| `fulfilled` \| `cancelled` (annulation = remboursement) |
-| `GET`    | `/api/balance`                | user  | Solde de l'utilisateur (proxy Wallet) |
-| `GET`    | `/api/wallet-status`          | user  | Wallet joignable / configuré |
-| `GET`    | `/api/backup/export`          | panel | Export (header `X-Panel-Key`) |
-| `POST`   | `/api/backup/import`          | panel | Import (header `X-Panel-Key`) |
-
----
-
-## Variables d'environnement
-
-| Variable | Défaut | Description |
-|---|---|---|
-| `PORT` | `3002` | Port d'écoute |
-| `PANEL_URL` | `http://localhost:8000` | URL du panel |
-| `DB_PATH` | `./orders-data.json` | Fichier de données |
-| `PANEL_API_KEY` | *(vide)* | Clé API du panel (backup + auth inter-addon) |
-| `WALLET_URL` | `http://localhost:3001` | URL de l'addon Wallet |
-
----
-
-## Sécurité (v1.3.0)
-
-- **Jetons vérifiés par le panel** (comme le Wallet) : un jeton falsifié est refusé. Avant la 1.3.0, un jeton `{"role":"ADMIN"}` non signé suffisait pour créer des produits ou annuler/rembourser des commandes. **Mettez à jour** (ainsi que le Wallet).
-- **Les clients ne voient plus la configuration de livraison** : `GET /api/products` ne renvoie aux non-admins que le mode (livraison automatique ou non) — jamais les listes de proxies privés ni les réglages internes.
-- Stock **réservé immédiatement** à la commande (deux clients ne peuvent plus acheter la dernière unité en même temps) et rendu en cas d'échec ou d'annulation.
-- Annulation d'une commande payée : **refusée si le Wallet est injoignable** (avant : remboursement silencieusement perdu) ; transitions de statut contrôlées (jamais de retour depuis « annulée ») ; livraison partielle → comptes déjà créés bloqués puis remboursement.
-- Solde du client lu via l'endpoint interne du Wallet (l'ancien appel échouait : le solde n'apparaissait pas dans la boutique).
-- Clés de passerelles de paiement : fichier de données en mode `0600`, aucun CORS, sauvegarde protégée par la clé du panel (obligatoire).
-
-## Corrections et nouveautés v1.3.0
-
-- **Création de produit avec une catégorie** : `delivery.account.property pool should not exist` corrigé ; la catégorie est vérifiée auprès du panel à l'enregistrement.
-- Repasser un produit en **stock illimité** est possible ; le trafic max se saisit en **Go décimaux** (comme le panel).
-- **Boutique cliente** : catalogue avec recherche/tri, indicateurs de stock, panier avec solde après commande et montant manquant, choix du moyen de paiement, confirmation avant paiement, accès livrés (mot de passe masqué, copie, téléchargement .txt), suivi des commandes avec frise, rafraîchissement automatique des paiements en attente, états vides.
-- **Gestion admin** : indicateurs (chiffre d'affaires, commandes à traiter, stock faible), produits (formulaire guidé avec validation, aperçu client, duplication, activation en un clic), commandes (recherche, filtres, pagination, détail, annulation/remboursement avec explication), état des moyens de paiement, export CSV.
-
-## Licence
-
-MIT — © 2026 Bloume SAS
+[MIT](LICENSE) © [Bloume SAS](https://bloume.fr)
