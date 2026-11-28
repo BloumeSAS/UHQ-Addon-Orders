@@ -322,11 +322,12 @@ export class OrdersController {
 
   /**
    * GET /api/payments/settings/reveal?key=... — valeur en clair d'un secret.
-   * N'est appelée que par le panel (server-to-server, port interne non exposé
-   * publiquement), après confirmation du mot de passe admin côté panel.
+   * N'est appelée que par le panel, après confirmation du mot de passe admin côté panel. La clé API du panel est EXIGÉE :
+   * sans elle, un simple jeton admin suffisait via le proxy /addon-proxy/orders/ (aucune vérification du mot de passe).
    */
   @Get('payments/settings/reveal')
-  async revealPaymentSecret(@Req() req: Request, @Query('key') key: string) {
+  async revealPaymentSecret(@Req() req: Request, @Headers('x-panel-key') panelKey: string | undefined, @Query('key') key: string) {
+    this.auth.requirePanelKey(panelKey);
     await this.auth.requireAdmin(req);
     return { value: this.payments.revealSecret(key) };
   }
